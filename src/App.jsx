@@ -149,12 +149,13 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
     supabase.from("profiles").select("*"),
+    supabase.from("posts").select("*").order("created_at", { ascending: false }),
   ]);
 
   if (catsRes.error) throw catsRes.error;
@@ -162,6 +163,7 @@ async function fetchAllData() {
   if (votesRes.error) throw votesRes.error;
   if (commentsRes.error) throw commentsRes.error;
   if (profilesRes.error) throw profilesRes.error;
+  if (postsRes.error) throw postsRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
@@ -204,7 +206,17 @@ async function fetchAllData() {
 
   const nextCategoryNumber = categories.length > 0 ? Math.max(...categories.map((c) => c.number)) + 1 : 1;
 
-  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data };
+  const posts = postsRes.data.map((p) => ({
+    id: p.id,
+    author: p.author,
+    avatarUrl: p.avatar_url || null,
+    text: p.text,
+    likes: p.likes,
+    liked: likedIds.has(p.id),
+    ts: new Date(p.created_at).getTime(),
+  }));
+
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -849,6 +861,82 @@ function LoginPrompt({ message, onRequestLogin }) {
     <div style={{ ...styles.card, textAlign: "center", padding: "32px 20px" }}>
       <div style={{ color: palette.muted, fontSize: "13px", marginBottom: "16px" }}>{message}</div>
       <button style={styles.submitBtn} onClick={onRequestLogin}>ログイン / 新規登録</button>
+    </div>
+  );
+}
+
+// ─── フィード（断片的なつぶやきが流れるTwitter風ページ） ───────────
+function FeedScreen({ data, refresh, session, displayName, avatarUrl, onRequestLogin }) {
+  const [text, setText] = useState("");
+  const posts = data.posts || [];
+
+  const postFeed = async () => {
+    if (!session || !text.trim()) return;
+    const t = text.trim();
+    setText("");
+    await supabase.from("posts").insert({ author: displayName, avatar_url: avatarUrl || null, text: t, likes: 0 });
+    await refresh();
+  };
+
+  const handleLike = async (id, currentLikes, alreadyLiked) => {
+    const likedIds = getLikedIds();
+    const newLikes = alreadyLiked ? Math.max(0, currentLikes - 1) : currentLikes + 1;
+    await supabase.from("posts").update({ likes: newLikes }).eq("id", id);
+    if (alreadyLiked) likedIds.delete(id);
+    else likedIds.add(id);
+    saveLikedIds(likedIds);
+    await refresh();
+  };
+
+  return (
+    <div style={styles.main}>
+      <div style={styles.sectionTitle}>フィード — {posts.length}件のつぶやき</div>
+
+      {session ? (
+        <div style={{ ...styles.card, marginBottom: "24px" }}>
+          <div style={styles.commentInputBar}>
+            <textarea
+              style={styles.textarea}
+              placeholder="いまどうしてる？"
+              value={text}
+              onChange={(e) => setText(e.target.value.slice(0, 280))}
+              rows={2}
+            />
+            <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={postFeed}>投稿</button>
+          </div>
+          <div style={{ fontSize: "11px", color: palette.muted, marginTop: "6px", textAlign: "right" }}>{text.length}/280</div>
+        </div>
+      ) : (
+        <div style={{ marginBottom: "24px" }}>
+          <LoginPrompt message="投稿するにはログインが必要です" onRequestLogin={onRequestLogin} />
+        </div>
+      )}
+
+      {posts.length === 0 ? (
+        <div style={{ ...styles.card, textAlign: "center", padding: "50px 28px" }}>
+          <div style={{ color: palette.muted, fontSize: "14px" }}>まだ投稿がありません。最初の一言を投稿してみましょう。</div>
+        </div>
+      ) : (
+        posts.map((p) => (
+          <div key={p.id} style={styles.commentCard}>
+            <div style={styles.commentMeta}>
+              {p.avatarUrl ? (
+                <img src={p.avatarUrl} alt="" style={{ ...styles.avatar(palette.accent), objectFit: "cover" }} />
+              ) : (
+                <span style={styles.avatar(palette.accent)}>{initials(p.author)}</span>
+              )}
+              <span style={styles.commentAuthor}>{p.author}</span>
+              <span style={styles.commentTime}>{timeAgo(p.ts)}</span>
+            </div>
+            <div style={styles.commentBody}>{p.text}</div>
+            <div style={styles.commentActions}>
+              <button style={styles.actionBtn(p.liked)} onClick={() => handleLike(p.id, p.likes, p.liked)}>
+                {p.liked ? "❤" : "♡"} {p.likes}
+              </button>
+            </div>
+          </div>
+        ))
+      )}
     </div>
   );
 }
@@ -1972,6 +2060,7 @@ export default function App() {
       {activeRoom === null && !showProfile && (
         <div style={styles.tabBar}>
           <button style={styles.tab(tab === "vote")} onClick={() => setTab("vote")}>投票する</button>
+          <button style={styles.tab(tab === "feed")} onClick={() => setTab("feed")}>📣 フィード</button>
           <button style={styles.tab(tab === "record")} onClick={() => setTab("record")}>🎯 成績</button>
           <button style={styles.tab(tab === "admin")} onClick={() => setTab("admin")}>管理画面</button>
         </div>
@@ -1983,6 +2072,8 @@ export default function App() {
         <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} session={session} displayName={displayName} avatarUrl={avatarUrl} onRequestLogin={requestLogin} />
       ) : tab === "vote" ? (
         <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} session={session} onRequestLogin={requestLogin} />
+      ) : tab === "feed" ? (
+        <FeedScreen data={data} refresh={refresh} session={session} displayName={displayName} avatarUrl={avatarUrl} onRequestLogin={requestLogin} />
       ) : tab === "record" ? (
         <MyRecordScreen data={data} session={session} onRequestLogin={requestLogin} onOpenRoom={openRoom} />
       ) : adminUnlocked ? (
