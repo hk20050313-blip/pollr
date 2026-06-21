@@ -536,7 +536,7 @@ function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
 
-function CommentItem({ comment, color, onReply, onLike, depth = 0 }) {
+function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin, depth = 0 }) {
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
 
@@ -545,6 +545,14 @@ function CommentItem({ comment, color, onReply, onLike, depth = 0 }) {
     onReply(comment.id, replyText.trim());
     setReplyText("");
     setReplying(false);
+  };
+
+  const clickReply = () => {
+    if (!session) {
+      onRequestLogin && onRequestLogin();
+      return;
+    }
+    setReplying((r) => !r);
   };
 
   return (
@@ -560,7 +568,7 @@ function CommentItem({ comment, color, onReply, onLike, depth = 0 }) {
           <button style={styles.actionBtn(comment.liked)} onClick={() => onLike(comment.id, comment.likes, comment.liked)}>
             {comment.liked ? "❤" : "♡"} {comment.likes}
           </button>
-          <button style={styles.actionBtn(false)} onClick={() => setReplying((r) => !r)}>
+          <button style={styles.actionBtn(false)} onClick={clickReply}>
             ↩ 返信
           </button>
           {comment.replies && comment.replies.length > 0 && (
@@ -586,7 +594,7 @@ function CommentItem({ comment, color, onReply, onLike, depth = 0 }) {
       {comment.replies && comment.replies.length > 0 && (
         <div style={styles.replyBox}>
           {comment.replies.map((r) => (
-            <CommentItem key={r.id} comment={r} color={color} onReply={onReply} onLike={onLike} depth={depth + 1} />
+            <CommentItem key={r.id} comment={r} color={color} onReply={onReply} onLike={onLike} session={session} onRequestLogin={onRequestLogin} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -594,7 +602,7 @@ function CommentItem({ comment, color, onReply, onLike, depth = 0 }) {
   );
 }
 
-function DiscussionRoom({ data, refresh, categoryId, onBack }) {
+function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayName, onRequestLogin }) {
   const category = data.categories.find((c) => c.id === categoryId);
   const [text, setText] = useState("");
   const relatedPolls = data.polls.filter((p) => p.categoryId === categoryId);
@@ -609,15 +617,16 @@ function DiscussionRoom({ data, refresh, categoryId, onBack }) {
   }
 
   const postComment = async () => {
-    if (!text.trim()) return;
+    if (!session || !text.trim()) return;
     const t = text.trim();
     setText("");
-    await supabase.from("comments").insert({ category_id: categoryId, author: GUEST_NAME, text: t, likes: 0 });
+    await supabase.from("comments").insert({ category_id: categoryId, author: displayName, text: t, likes: 0 });
     await refresh();
   };
 
   const handleReply = async (parentId, replyText) => {
-    await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: GUEST_NAME, text: replyText, likes: 0 });
+    if (!session) return;
+    await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, text: replyText, likes: 0 });
     await refresh();
   };
 
@@ -648,19 +657,25 @@ function DiscussionRoom({ data, refresh, categoryId, onBack }) {
         {relatedPolls.length > 0 && ` · 関連する質問 ${relatedPolls.length}件`}
       </div>
 
-      <div style={{ ...styles.card, marginBottom: "24px" }}>
-        <label style={styles.label}>このテーマについて投稿する</label>
-        <div style={styles.commentInputBar}>
-          <textarea
-            style={styles.textarea}
-            placeholder={`#${category.number} ${category.name} について意見を書く...`}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            rows={2}
-          />
-          <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={postComment}>投稿</button>
+      {session ? (
+        <div style={{ ...styles.card, marginBottom: "24px" }}>
+          <label style={styles.label}>このテーマについて投稿する</label>
+          <div style={styles.commentInputBar}>
+            <textarea
+              style={styles.textarea}
+              placeholder={`#${category.number} ${category.name} について意見を書く...`}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={2}
+            />
+            <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={postComment}>投稿</button>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div style={{ marginBottom: "24px" }}>
+          <LoginPrompt message="コメントするにはログインが必要です" onRequestLogin={onRequestLogin} />
+        </div>
+      )}
 
       {comments.length === 0 ? (
         <div style={{ ...styles.card, textAlign: "center", padding: "50px 28px" }}>
@@ -668,7 +683,7 @@ function DiscussionRoom({ data, refresh, categoryId, onBack }) {
         </div>
       ) : (
         comments.map((c) => (
-          <CommentItem key={c.id} comment={c} color={category.color} onReply={handleReply} onLike={handleLike} />
+          <CommentItem key={c.id} comment={c} color={category.color} onReply={handleReply} onLike={handleLike} session={session} onRequestLogin={onRequestLogin} />
         ))
       )}
     </div>
@@ -676,7 +691,93 @@ function DiscussionRoom({ data, refresh, categoryId, onBack }) {
 }
 
 
-function VoteScreen({ data, refresh, onOpenRoom, voterId }) {
+// ─── ログイン／新規登録フォーム ────────────────────────────────
+function AuthForm({ onSuccess }) {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const submit = async () => {
+    setError("");
+    if (!email.trim() || !password.trim() || (mode === "signup" && !displayName.trim())) {
+      setError("すべての項目を入力してください");
+      return;
+    }
+    setLoading(true);
+    if (mode === "signup") {
+      const { data, error } = await supabase.auth.signUp({ email: email.trim(), password });
+      if (error) {
+        setError(error.message);
+        setLoading(false);
+        return;
+      }
+      if (data.user) {
+        await supabase.from("profiles").insert({ id: data.user.id, display_name: displayName.trim() });
+      }
+      setLoading(false);
+      onSuccess && onSuccess();
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+      setLoading(false);
+      if (error) {
+        setError(error.message);
+        return;
+      }
+      onSuccess && onSuccess();
+    }
+  };
+
+  return (
+    <div style={{ ...styles.card, maxWidth: "360px", margin: "0 auto 24px" }}>
+      <div style={{ display: "flex", gap: "8px", marginBottom: "16px" }}>
+        <button style={styles.tab(mode === "login")} onClick={() => { setMode("login"); setError(""); }}>ログイン</button>
+        <button style={styles.tab(mode === "signup")} onClick={() => { setMode("signup"); setError(""); }}>新規登録</button>
+      </div>
+      {mode === "signup" && (
+        <input
+          style={styles.input}
+          placeholder="表示名（コメントなどに表示されます）"
+          value={displayName}
+          onChange={(e) => setDisplayName(e.target.value)}
+        />
+      )}
+      <input
+        style={styles.input}
+        type="email"
+        placeholder="メールアドレス"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+      />
+      <input
+        style={styles.input}
+        type="password"
+        placeholder="パスワード（6文字以上）"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && submit()}
+      />
+      {error && <div style={{ color: palette.danger, fontSize: "12px", marginBottom: "12px" }}>{error}</div>}
+      <button style={{ ...styles.submitBtn, opacity: loading ? 0.6 : 1 }} onClick={submit} disabled={loading}>
+        {loading ? "処理中..." : mode === "signup" ? "登録する" : "ログイン"}
+      </button>
+    </div>
+  );
+}
+
+function LoginPrompt({ message, onRequestLogin }) {
+  return (
+    <div style={{ ...styles.card, textAlign: "center", padding: "32px 20px" }}>
+      <div style={{ color: palette.muted, fontSize: "13px", marginBottom: "16px" }}>{message}</div>
+      <button style={styles.submitBtn} onClick={onRequestLogin}>ログイン / 新規登録</button>
+    </div>
+  );
+}
+
+function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
+  const voterId = session ? session.user.id : null;
   const [filterCat, setFilterCat] = useState(null);
 
   const initialState = () => {
@@ -709,6 +810,7 @@ function VoteScreen({ data, refresh, onOpenRoom, voterId }) {
   };
 
   const submitVote = async (poll) => {
+    if (!session) return;
     const sel = selections[poll.id] || [];
     if (sel.length === 0) return;
     setVoted((prev) => ({ ...prev, [poll.id]: true }));
@@ -799,6 +901,8 @@ function VoteScreen({ data, refresh, onOpenRoom, voterId }) {
                     合計 {total} 票{!poll.resolved && " · 正解発表をお待ちください"}
                   </div>
                 </div>
+              ) : !session ? (
+                <LoginPrompt message="投票するにはログインが必要です" onRequestLogin={onRequestLogin} />
               ) : (
                 <div>
                   {poll.options.map((opt, i) => (
@@ -1265,9 +1369,18 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
 }
 
 // ─── 成績（的中率トラッキング）画面 ─────────────────────────────
-// 注：現状はログイン機能が未実装のため、ブラウザごとに付与した仮ID（voterId）単位の集計。
-// 将来ログイン機能を実装すれば、このvoteRecordsをそのままユーザー単位の集計に転用できる。
-function MyRecordScreen({ data, voterId, onOpenRoom }) {
+// ログイン中のユーザーのIDを使って、本人の投票記録を集計する
+function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
+  if (!session) {
+    return (
+      <div style={styles.main}>
+        <div style={styles.sectionTitle}>成績 — 的中率トラッキング</div>
+        <LoginPrompt message="成績を見るにはログインが必要です" onRequestLogin={onRequestLogin} />
+      </div>
+    );
+  }
+
+  const voterId = session.user.id;
   const myRecords = (data.voteRecords || []).filter((r) => r.voterId === voterId);
 
   const history = myRecords
@@ -1359,7 +1472,9 @@ export default function App() {
   const [data, setData] = useState(null); // null = 読み込み中
   const [error, setError] = useState(null);
   const [activeRoom, setActiveRoom] = useState(null); // categoryId or null
-  const [voterId] = useState(getVoterId);
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [showAuthForm, setShowAuthForm] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(() => {
     try {
       return localStorage.getItem(ADMIN_UNLOCK_KEY) === "true";
@@ -1384,6 +1499,27 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setProfile(null);
+      return;
+    }
+    supabase
+      .from("profiles")
+      .select("*")
+      .eq("id", session.user.id)
+      .maybeSingle()
+      .then(({ data }) => setProfile(data));
+  }, [session]);
+
+  useEffect(() => {
     const link = document.createElement("link");
     link.href = "https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&display=swap";
     link.rel = "stylesheet";
@@ -1392,6 +1528,11 @@ export default function App() {
 
   const openRoom = (categoryId) => setActiveRoom(categoryId);
   const closeRoom = () => setActiveRoom(null);
+  const requestLogin = () => setShowAuthForm(true);
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+  };
+  const displayName = profile?.display_name || session?.user?.email || "ゲスト";
 
   if (error) {
     return (
@@ -1418,10 +1559,33 @@ export default function App() {
     <div style={styles.app}>
       <div style={styles.header}>
         <div style={styles.logo}>◈ Pollr</div>
-        <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.1em" }}>
-          {data.polls.filter((p) => p.active).length} 件公開中
+        <div style={{ display: "flex", alignItems: "center", gap: "18px" }}>
+          <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.1em" }}>
+            {data.polls.filter((p) => p.active).length} 件公開中
+          </div>
+          {session ? (
+            <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }}>
+              <span style={{ color: palette.accent }}>{displayName}</span>
+              <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "11px" }} onClick={handleLogout}>
+                ログアウト
+              </button>
+            </div>
+          ) : (
+            <button
+              style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }}
+              onClick={() => setShowAuthForm((s) => !s)}
+            >
+              ログイン
+            </button>
+          )}
         </div>
       </div>
+
+      {!session && showAuthForm && (
+        <div style={{ padding: "24px 32px 0" }}>
+          <AuthForm onSuccess={() => setShowAuthForm(false)} />
+        </div>
+      )}
 
       {activeRoom === null && (
         <div style={styles.tabBar}>
@@ -1432,11 +1596,11 @@ export default function App() {
       )}
 
       {activeRoom !== null ? (
-        <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} />
+        <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} session={session} displayName={displayName} onRequestLogin={requestLogin} />
       ) : tab === "vote" ? (
-        <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} voterId={voterId} />
+        <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} session={session} onRequestLogin={requestLogin} />
       ) : tab === "record" ? (
-        <MyRecordScreen data={data} voterId={voterId} onOpenRoom={openRoom} />
+        <MyRecordScreen data={data} session={session} onRequestLogin={requestLogin} onOpenRoom={openRoom} />
       ) : adminUnlocked ? (
         <AdminScreen data={data} refresh={refresh} onOpenRoom={openRoom} />
       ) : (
