@@ -62,6 +62,33 @@ function pointsForRecord(poll, selectedOptions) {
   return correct ? (poll.correctPoints || 0) : -(poll.incorrectPoints || 0);
 }
 
+// 全ユーザーの的中率・ポイントを集計する（管理画面用）
+function computeLeaderboard(data) {
+  const byUser = {};
+  (data.voteRecords || []).forEach((r) => {
+    const poll = data.polls.find((p) => p.id === r.pollId);
+    if (!poll) return;
+    const correct = isCorrectSelection(poll, r.selectedOptions);
+    if (correct === null) return; // まだ正解未確定の質問は集計しない
+    if (!byUser[r.voterId]) byUser[r.voterId] = { voterId: r.voterId, total: 0, correctCount: 0, points: 0 };
+    byUser[r.voterId].total += 1;
+    if (correct) byUser[r.voterId].correctCount += 1;
+    byUser[r.voterId].points += pointsForRecord(poll, r.selectedOptions) || 0;
+  });
+
+  const profileMap = {};
+  (data.profiles || []).forEach((p) => { profileMap[p.id] = p; });
+
+  return Object.values(byUser)
+    .map((u) => ({
+      ...u,
+      displayName: profileMap[u.voterId]?.display_name || "（不明なユーザー）",
+      avatarUrl: profileMap[u.voterId]?.avatar_url || null,
+      rate: u.total > 0 ? Math.round((u.correctCount / u.total) * 100) : 0,
+    }))
+    .sort((a, b) => b.points - a.points);
+}
+
 // ─── 公開スケジュール（開始日時・終了日時）関連のヘルパー ──────────
 // activeフラグ（管理者の手動スイッチ）に加えて、開始/終了日時が設定されていれば
 // その期間外は自動的に投票できない状態にする
@@ -122,17 +149,19 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
+    supabase.from("profiles").select("*"),
   ]);
 
   if (catsRes.error) throw catsRes.error;
   if (pollsRes.error) throw pollsRes.error;
   if (votesRes.error) throw votesRes.error;
   if (commentsRes.error) throw commentsRes.error;
+  if (profilesRes.error) throw profilesRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
@@ -175,7 +204,7 @@ async function fetchAllData() {
 
   const nextCategoryNumber = categories.length > 0 ? Math.max(...categories.map((c) => c.number)) + 1 : 1;
 
-  return { categories, polls, voteRecords, nextCategoryNumber };
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -1110,12 +1139,67 @@ function AdminGate({ onUnlock }) {
   );
 }
 
+// ─── 全ユーザーの成績（管理者専用） ─────────────────────────────
+function AdminLeaderboard({ data }) {
+  const leaderboard = computeLeaderboard(data);
+
+  return (
+    <div style={{ ...styles.card, marginBottom: "28px" }}>
+      <div style={styles.sectionTitle}>全ユーザーの成績</div>
+      {leaderboard.length === 0 ? (
+        <div style={{ color: palette.muted, fontSize: "13px" }}>まだ正解が確定した質問への投票がありません。</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {leaderboard.map((u, i) => (
+            <div
+              key={u.voterId}
+              style={{ display: "flex", alignItems: "center", gap: "12px", padding: "10px 12px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}
+            >
+              <div style={{ fontSize: "13px", fontWeight: "800", color: palette.muted, width: "24px" }}>#{i + 1}</div>
+              <div
+                style={{
+                  width: "32px",
+                  height: "32px",
+                  borderRadius: "50%",
+                  overflow: "hidden",
+                  background: palette.border,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "12px",
+                  fontWeight: "700",
+                  color: palette.accent,
+                  flexShrink: 0,
+                }}
+              >
+                {u.avatarUrl ? (
+                  <img src={u.avatarUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                ) : (
+                  initials(u.displayName)
+                )}
+              </div>
+              <div style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{u.displayName}</div>
+              <div style={{ fontSize: "11px", color: palette.muted }}>
+                {u.total}件 / 的中{u.correctCount}件（{u.rate}%）
+              </div>
+              <div style={{ fontSize: "13px", fontWeight: "800", color: u.points >= 0 ? palette.green : palette.danger, minWidth: "60px", textAlign: "right" }}>
+                {u.points >= 0 ? `+${u.points}` : u.points}pt
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── ADMIN SCREEN ────────────────────────────────────────────────
 function AdminScreen({ data, refresh, onOpenRoom }) {
   const [editId, setEditId] = useState(null);
   const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0" });
   const [showNew, setShowNew] = useState(false);
   const [showCatManager, setShowCatManager] = useState(false);
+  const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [filterCat, setFilterCat] = useState(null);
   const [openResolve, setOpenResolve] = useState({});
   const [correctDraft, setCorrectDraft] = useState({});
@@ -1239,15 +1323,25 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
 
   return (
     <div style={styles.main}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px", gap: "8px", flexWrap: "wrap" }}>
         <div style={styles.sectionTitle}>管理画面</div>
-        <button
-          style={{ ...styles.submitBtn, marginTop: 0, background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
-          onClick={() => setShowCatManager((s) => !s)}
-        >
-          {showCatManager ? "テーマ管理を閉じる" : "🏷 テーマを管理"}
-        </button>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <button
+            style={{ ...styles.submitBtn, marginTop: 0, background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
+            onClick={() => setShowLeaderboard((s) => !s)}
+          >
+            {showLeaderboard ? "成績一覧を閉じる" : "👥 全員の成績を見る"}
+          </button>
+          <button
+            style={{ ...styles.submitBtn, marginTop: 0, background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
+            onClick={() => setShowCatManager((s) => !s)}
+          >
+            {showCatManager ? "テーマ管理を閉じる" : "🏷 テーマを管理"}
+          </button>
+        </div>
       </div>
+
+      {showLeaderboard && <AdminLeaderboard data={data} />}
 
       {showCatManager && <CategoryManager data={data} refresh={refresh} onOpenRoom={onOpenRoom} />}
 
