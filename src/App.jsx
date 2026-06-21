@@ -8,6 +8,11 @@ const supabase = createClient(
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNuZGVoYmh5bXBoZnBxanVyY2FyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE4NzQ5MzcsImV4cCI6MjA5NzQ1MDkzN30.MhpHkKYCe-_vmZ42nVWeUjmb0WjgLShmWgnM12cKPNw"
 );
 
+// ─── 管理画面の簡易パスワード（本格的な安全対策ではなく、知らない人が誤って／気軽に管理画面を
+// 触ってしまうのを防ぐための簡易的なものです。変えたい場合はこの行の文字列を書き換えてください） ──
+const ADMIN_PASSWORD = "pollr-admin-2026";
+const ADMIN_UNLOCK_KEY = "polling_app_admin_unlocked";
+
 // ─── 投票者ID（ログイン機能実装までの仮の本人識別。同一ブラウザ内でのみ有効） ──
 const VOTER_ID_KEY = "polling_app_voter_id";
 function getVoterId() {
@@ -910,6 +915,45 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
   );
 }
 
+// ─── 管理画面の簡易パスワードゲート ───────────────────────────
+function AdminGate({ onUnlock }) {
+  const [input, setInput] = useState("");
+  const [error, setError] = useState(false);
+
+  const tryUnlock = () => {
+    if (input === ADMIN_PASSWORD) {
+      try { localStorage.setItem(ADMIN_UNLOCK_KEY, "true"); } catch {}
+      onUnlock();
+    } else {
+      setError(true);
+    }
+  };
+
+  return (
+    <div style={styles.main}>
+      <div style={{ ...styles.card, maxWidth: "340px", margin: "60px auto", textAlign: "center" }}>
+        <div style={{ fontSize: "32px", marginBottom: "12px" }}>🔒</div>
+        <div style={{ ...styles.sectionTitle, marginBottom: "16px" }}>管理画面パスワード</div>
+        <input
+          type="password"
+          style={styles.input}
+          placeholder="パスワードを入力"
+          value={input}
+          onChange={(e) => { setInput(e.target.value); setError(false); }}
+          onKeyDown={(e) => e.key === "Enter" && tryUnlock()}
+          autoFocus
+        />
+        {error && (
+          <div style={{ color: palette.danger, fontSize: "12px", marginBottom: "12px" }}>
+            パスワードが違います
+          </div>
+        )}
+        <button style={styles.submitBtn} onClick={tryUnlock}>開く</button>
+      </div>
+    </div>
+  );
+}
+
 // ─── ADMIN SCREEN ────────────────────────────────────────────────
 function AdminScreen({ data, refresh, onOpenRoom }) {
   const [editId, setEditId] = useState(null);
@@ -1316,6 +1360,13 @@ export default function App() {
   const [error, setError] = useState(null);
   const [activeRoom, setActiveRoom] = useState(null); // categoryId or null
   const [voterId] = useState(getVoterId);
+  const [adminUnlocked, setAdminUnlocked] = useState(() => {
+    try {
+      return localStorage.getItem(ADMIN_UNLOCK_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
 
   const refresh = async () => {
     try {
@@ -1386,8 +1437,10 @@ export default function App() {
         <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} voterId={voterId} />
       ) : tab === "record" ? (
         <MyRecordScreen data={data} voterId={voterId} onOpenRoom={openRoom} />
-      ) : (
+      ) : adminUnlocked ? (
         <AdminScreen data={data} refresh={refresh} onOpenRoom={openRoom} />
+      ) : (
+        <AdminGate onUnlock={() => setAdminUnlocked(true)} />
       )}
     </div>
   );
