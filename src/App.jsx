@@ -625,11 +625,13 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
 
-  const submitReply = () => {
+  const submitReply = async () => {
     if (!replyText.trim()) return;
-    onReply(comment.id, replyText.trim());
-    setReplyText("");
-    setReplying(false);
+    const ok = await onReply(comment.id, replyText.trim());
+    if (ok) {
+      setReplyText("");
+      setReplying(false);
+    }
   };
 
   const clickReply = () => {
@@ -694,6 +696,7 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
 function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayName, avatarUrl, onRequestLogin }) {
   const category = data.categories.find((c) => c.id === categoryId);
   const [text, setText] = useState("");
+  const [postError, setPostError] = useState("");
   const relatedPolls = data.polls.filter((p) => p.categoryId === categoryId);
 
   if (!category) {
@@ -707,22 +710,35 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
 
   const postComment = async () => {
     if (!session || !text.trim()) return;
-    const t = text.trim();
+    setPostError("");
+    const { error } = await supabase.from("comments").insert({ category_id: categoryId, author: displayName, avatar_url: avatarUrl || null, text: text.trim(), likes: 0 });
+    if (error) {
+      setPostError("投稿に失敗しました： " + error.message);
+      return;
+    }
     setText("");
-    await supabase.from("comments").insert({ category_id: categoryId, author: displayName, avatar_url: avatarUrl || null, text: t, likes: 0 });
     await refresh();
   };
 
   const handleReply = async (parentId, replyText) => {
-    if (!session) return;
-    await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, avatar_url: avatarUrl || null, text: replyText, likes: 0 });
+    if (!session) return false;
+    const { error } = await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, avatar_url: avatarUrl || null, text: replyText, likes: 0 });
+    if (error) {
+      alert("返信の投稿に失敗しました： " + error.message);
+      return false;
+    }
     await refresh();
+    return true;
   };
 
   const handleLike = async (id, currentLikes, alreadyLiked) => {
     const likedIds = getLikedIds();
     const newLikes = alreadyLiked ? Math.max(0, currentLikes - 1) : currentLikes + 1;
-    await supabase.from("comments").update({ likes: newLikes }).eq("id", id);
+    const { error } = await supabase.from("comments").update({ likes: newLikes }).eq("id", id);
+    if (error) {
+      alert("いいねに失敗しました： " + error.message);
+      return;
+    }
     if (alreadyLiked) likedIds.delete(id);
     else likedIds.add(id);
     saveLikedIds(likedIds);
@@ -759,6 +775,7 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
             />
             <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={postComment}>投稿</button>
           </div>
+          {postError && <div style={{ color: palette.danger, fontSize: "12px", marginTop: "8px" }}>{postError}</div>}
         </div>
       ) : (
         <div style={{ marginBottom: "24px" }}>
@@ -868,20 +885,29 @@ function LoginPrompt({ message, onRequestLogin }) {
 // ─── フィード（断片的なつぶやきが流れるTwitter風ページ） ───────────
 function FeedScreen({ data, refresh, session, displayName, avatarUrl, onRequestLogin }) {
   const [text, setText] = useState("");
+  const [postError, setPostError] = useState("");
   const posts = data.posts || [];
 
   const postFeed = async () => {
     if (!session || !text.trim()) return;
-    const t = text.trim();
+    setPostError("");
+    const { error } = await supabase.from("posts").insert({ author: displayName, avatar_url: avatarUrl || null, text: text.trim(), likes: 0 });
+    if (error) {
+      setPostError("投稿に失敗しました： " + error.message);
+      return;
+    }
     setText("");
-    await supabase.from("posts").insert({ author: displayName, avatar_url: avatarUrl || null, text: t, likes: 0 });
     await refresh();
   };
 
   const handleLike = async (id, currentLikes, alreadyLiked) => {
     const likedIds = getLikedIds();
     const newLikes = alreadyLiked ? Math.max(0, currentLikes - 1) : currentLikes + 1;
-    await supabase.from("posts").update({ likes: newLikes }).eq("id", id);
+    const { error } = await supabase.from("posts").update({ likes: newLikes }).eq("id", id);
+    if (error) {
+      alert("いいねに失敗しました： " + error.message);
+      return;
+    }
     if (alreadyLiked) likedIds.delete(id);
     else likedIds.add(id);
     saveLikedIds(likedIds);
@@ -905,6 +931,7 @@ function FeedScreen({ data, refresh, session, displayName, avatarUrl, onRequestL
             <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={postFeed}>投稿</button>
           </div>
           <div style={{ fontSize: "11px", color: palette.muted, marginTop: "6px", textAlign: "right" }}>{text.length}/280</div>
+          {postError && <div style={{ color: palette.danger, fontSize: "12px", marginTop: "8px" }}>{postError}</div>}
         </div>
       ) : (
         <div style={{ marginBottom: "24px" }}>
@@ -978,8 +1005,12 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
     if (!session) return;
     const sel = selections[poll.id] || [];
     if (sel.length === 0) return;
+    const { error } = await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel });
+    if (error) {
+      alert("投票に失敗しました： " + error.message);
+      return;
+    }
     setVoted((prev) => ({ ...prev, [poll.id]: true }));
-    await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel });
     await refresh();
   };
 
