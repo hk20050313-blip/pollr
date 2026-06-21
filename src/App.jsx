@@ -55,6 +55,13 @@ function isCorrectSelection(poll, selectedOptions) {
   return a.every((v, i) => v === b[i]);
 }
 
+// 投票記録1件分の獲得／損失ポイントを計算する（未確定の質問はnull）
+function pointsForRecord(poll, selectedOptions) {
+  const correct = isCorrectSelection(poll, selectedOptions);
+  if (correct === null) return null;
+  return correct ? (poll.correctPoints || 0) : -(poll.incorrectPoints || 0);
+}
+
 // ─── 公開スケジュール（開始日時・終了日時）関連のヘルパー ──────────
 // activeフラグ（管理者の手動スイッチ）に加えて、開始/終了日時が設定されていれば
 // その期間外は自動的に投票できない状態にする
@@ -161,6 +168,8 @@ async function fetchAllData() {
       correctOptions: p.correct_options || [],
       startsAt: p.starts_at || null,
       endsAt: p.ends_at || null,
+      correctPoints: p.correct_points ?? 10,
+      incorrectPoints: p.incorrect_points ?? 0,
     };
   });
 
@@ -888,6 +897,9 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                 </div>
               </div>
               <div style={styles.questionText}>{poll.question}</div>
+              <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
+                🏆 正解 +{poll.correctPoints}pt ／ 不正解 -{poll.incorrectPoints}pt
+              </div>
 
               {didVote ? (
                 <div>
@@ -897,6 +909,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
 
                   {poll.resolved && (() => {
                     const correct = isCorrectSelection(poll, sel);
+                    const pts = pointsForRecord(poll, sel);
                     return (
                       <div
                         style={{
@@ -911,7 +924,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                           border: `1px solid ${correct ? palette.green : palette.danger}`,
                         }}
                       >
-                        {correct ? "🎯 的中！あなたの予測は正解でした" : "✗ 不正解でした"}
+                        {correct ? "🎯 的中！あなたの予測は正解でした" : "✗ 不正解でした"}　{pts >= 0 ? `+${pts}` : pts}pt
                       </div>
                     );
                   })()}
@@ -1100,7 +1113,7 @@ function AdminGate({ onUnlock }) {
 // ─── ADMIN SCREEN ────────────────────────────────────────────────
 function AdminScreen({ data, refresh, onOpenRoom }) {
   const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "" });
+  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0" });
   const [showNew, setShowNew] = useState(false);
   const [showCatManager, setShowCatManager] = useState(false);
   const [filterCat, setFilterCat] = useState(null);
@@ -1108,7 +1121,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
   const [correctDraft, setCorrectDraft] = useState({});
 
   const openNew = () => {
-    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "" });
+    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0" });
     setEditId(null);
     setShowNew(true);
   };
@@ -1121,6 +1134,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
       categoryId: poll.categoryId || "",
       startsAt: toDatetimeLocalValue(poll.startsAt),
       endsAt: toDatetimeLocalValue(poll.endsAt),
+      correctPoints: String(poll.correctPoints ?? 10),
+      incorrectPoints: String(poll.incorrectPoints ?? 0),
     });
     setEditId(poll.id);
     setShowNew(true);
@@ -1134,6 +1149,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
     const categoryId = form.categoryId || null;
     const startsAt = form.startsAt ? new Date(form.startsAt).toISOString() : null;
     const endsAt = form.endsAt ? new Date(form.endsAt).toISOString() : null;
+    const correctPoints = Math.max(0, Number(form.correctPoints) || 0);
+    const incorrectPoints = Math.max(0, Number(form.incorrectPoints) || 0);
     if (editId) {
       // 選択肢が変わるとインデックスの意味が変わるため、過去の個別投票記録と正解設定はクリアする
       await supabase.from("polls").update({
@@ -1145,6 +1162,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         correct_options: [],
         starts_at: startsAt,
         ends_at: endsAt,
+        correct_points: correctPoints,
+        incorrect_points: incorrectPoints,
       }).eq("id", editId);
       await supabase.from("vote_records").delete().eq("poll_id", editId);
     } else {
@@ -1158,6 +1177,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         correct_options: [],
         starts_at: startsAt,
         ends_at: endsAt,
+        correct_points: correctPoints,
+        incorrect_points: incorrectPoints,
       });
     }
     closeForm();
@@ -1309,6 +1330,32 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
             空欄のままにすると、今までと同じ「公開する」ボタンでの手動切り替えのみになります
           </div>
 
+          <div style={{ display: "flex", gap: "12px" }}>
+            <div style={{ flex: 1 }}>
+              <label style={styles.label}>正解時に獲得するポイント</label>
+              <input
+                type="number"
+                min="0"
+                style={styles.input}
+                value={form.correctPoints}
+                onChange={(e) => setForm({ ...form, correctPoints: e.target.value })}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={styles.label}>不正解時に失うポイント</label>
+              <input
+                type="number"
+                min="0"
+                style={styles.input}
+                value={form.incorrectPoints}
+                onChange={(e) => setForm({ ...form, incorrectPoints: e.target.value })}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
+            「失うポイント」はプラスの数で入力してください（自動的に減点されます）
+          </div>
+
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "20px" }}>
             <input
               type="checkbox"
@@ -1353,6 +1400,9 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
                     📅 {poll.startsAt ? formatDateTime(poll.startsAt) : "開始日時未設定"} 〜 {poll.endsAt ? formatDateTime(poll.endsAt) : "終了日時未設定"}
                   </div>
                 )}
+                <div style={{ fontSize: "11px", color: palette.muted, marginTop: "4px" }}>
+                  🏆 正解 +{poll.correctPoints}pt ／ 不正解 -{poll.incorrectPoints}pt
+                </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: "6px", alignItems: "flex-end" }}>
                 <span style={{ ...styles.badge(true), color: status.color, border: `1px solid ${status.color}`, background: "transparent" }}>{status.text}</span>
@@ -1469,7 +1519,7 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
     .map((r) => {
       const poll = data.polls.find((p) => p.id === r.pollId);
       if (!poll) return null;
-      return { record: r, poll, correct: isCorrectSelection(poll, r.selectedOptions) };
+      return { record: r, poll, correct: isCorrectSelection(poll, r.selectedOptions), points: pointsForRecord(poll, r.selectedOptions) };
     })
     .filter(Boolean)
     .sort((a, b) => b.record.ts - a.record.ts);
@@ -1479,6 +1529,7 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
   const total = resolvedHistory.length;
   const correctCount = resolvedHistory.filter((h) => h.correct).length;
   const rate = total > 0 ? Math.round((correctCount / total) * 100) : 0;
+  const totalPoints = resolvedHistory.reduce((sum, h) => sum + (h.points || 0), 0);
 
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
 
@@ -1499,6 +1550,12 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
           <div style={{ fontSize: "28px", fontWeight: "800", color: palette.accent }}>{total > 0 ? `${rate}%` : "—"}</div>
           <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginTop: "4px" }}>的中率</div>
         </div>
+        <div style={{ flex: "1 1 100px" }}>
+          <div style={{ fontSize: "28px", fontWeight: "800", color: totalPoints >= 0 ? palette.green : palette.danger }}>
+            {totalPoints >= 0 ? `+${totalPoints}` : totalPoints}
+          </div>
+          <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginTop: "4px" }}>獲得ポイント</div>
+        </div>
         {pendingHistory.length > 0 && (
           <div style={{ flex: "1 1 100px" }}>
             <div style={{ fontSize: "28px", fontWeight: "800", color: palette.muted }}>{pendingHistory.length}</div>
@@ -1517,7 +1574,7 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
           </div>
         </div>
       ) : (
-        history.map(({ record, poll, correct }) => {
+        history.map(({ record, poll, correct, points }) => {
           const cat = getCategory(poll.categoryId);
           const yourAnswer = record.selectedOptions.map((i) => poll.options[i]).join("、");
           return (
@@ -1530,10 +1587,14 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
                   結果待ち
                 </span>
               ) : correct ? (
-                <span style={styles.badge(true)}>🎯 的中</span>
+                <>
+                  <span style={styles.badge(true)}>🎯 的中</span>
+                  <span style={{ marginLeft: "10px", fontSize: "12px", fontWeight: "700", color: palette.green }}>+{points}pt</span>
+                </>
               ) : (
                 <>
                   <span style={styles.badge(false)}>不正解</span>
+                  <span style={{ marginLeft: "10px", fontSize: "12px", fontWeight: "700", color: palette.danger }}>{points}pt</span>
                   <div style={{ fontSize: "12px", color: palette.green, marginTop: "8px" }}>
                     正解：{poll.correctOptions.map((i) => poll.options[i]).join("、")}
                   </div>
