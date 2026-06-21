@@ -55,6 +55,38 @@ function isCorrectSelection(poll, selectedOptions) {
   return a.every((v, i) => v === b[i]);
 }
 
+// ─── 公開スケジュール（開始日時・終了日時）関連のヘルパー ──────────
+// activeフラグ（管理者の手動スイッチ）に加えて、開始/終了日時が設定されていれば
+// その期間外は自動的に投票できない状態にする
+function isPollOpen(poll) {
+  if (!poll.active) return false;
+  const now = Date.now();
+  if (poll.startsAt && now < new Date(poll.startsAt).getTime()) return false;
+  if (poll.endsAt && now > new Date(poll.endsAt).getTime()) return false;
+  return true;
+}
+
+function pollStatusLabel(poll) {
+  if (!poll.active) return { text: "非公開", color: palette.muted };
+  const now = Date.now();
+  if (poll.startsAt && now < new Date(poll.startsAt).getTime()) return { text: "開始前", color: palette.accent };
+  if (poll.endsAt && now > new Date(poll.endsAt).getTime()) return { text: "終了", color: palette.danger };
+  return { text: "公開中", color: palette.green };
+}
+
+// ISO文字列 ⇔ <input type="datetime-local"> の値（ローカル時刻）の変換
+function toDatetimeLocalValue(isoString) {
+  if (!isoString) return "";
+  const d = new Date(isoString);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function formatDateTime(isoString) {
+  if (!isoString) return null;
+  return new Date(isoString).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
 // フラットなコメント一覧（parent_idで親を指す形）を、ネストしたツリーに変換する
 function buildCommentTree(flat, likedIds) {
   const byId = {};
@@ -127,6 +159,8 @@ async function fetchAllData() {
       categoryId: p.category_id,
       resolved: p.resolved,
       correctOptions: p.correct_options || [],
+      startsAt: p.starts_at || null,
+      endsAt: p.ends_at || null,
     };
   });
 
@@ -799,7 +833,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
   const [selections, setSelections] = useState(() => initialState().sel);
   const [voted, setVoted] = useState(() => initialState().vd);
 
-  const activePolls = data.polls.filter((p) => p.active && (filterCat === null || p.categoryId === filterCat));
+  const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
 
   const toggle = (pollId, idx, multiple) => {
@@ -1066,7 +1100,7 @@ function AdminGate({ onUnlock }) {
 // ─── ADMIN SCREEN ────────────────────────────────────────────────
 function AdminScreen({ data, refresh, onOpenRoom }) {
   const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "" });
+  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "" });
   const [showNew, setShowNew] = useState(false);
   const [showCatManager, setShowCatManager] = useState(false);
   const [filterCat, setFilterCat] = useState(null);
@@ -1074,13 +1108,20 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
   const [correctDraft, setCorrectDraft] = useState({});
 
   const openNew = () => {
-    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "" });
+    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "" });
     setEditId(null);
     setShowNew(true);
   };
 
   const openEdit = (poll) => {
-    setForm({ question: poll.question, options: [...poll.options], multiple: poll.multiple, categoryId: poll.categoryId || "" });
+    setForm({
+      question: poll.question,
+      options: [...poll.options],
+      multiple: poll.multiple,
+      categoryId: poll.categoryId || "",
+      startsAt: toDatetimeLocalValue(poll.startsAt),
+      endsAt: toDatetimeLocalValue(poll.endsAt),
+    });
     setEditId(poll.id);
     setShowNew(true);
   };
@@ -1091,6 +1132,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
     if (!form.question.trim() || form.options.filter((o) => o.trim()).length < 2) return;
     const cleanOpts = form.options.filter((o) => o.trim());
     const categoryId = form.categoryId || null;
+    const startsAt = form.startsAt ? new Date(form.startsAt).toISOString() : null;
+    const endsAt = form.endsAt ? new Date(form.endsAt).toISOString() : null;
     if (editId) {
       // 選択肢が変わるとインデックスの意味が変わるため、過去の個別投票記録と正解設定はクリアする
       await supabase.from("polls").update({
@@ -1100,6 +1143,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         category_id: categoryId,
         resolved: false,
         correct_options: [],
+        starts_at: startsAt,
+        ends_at: endsAt,
       }).eq("id", editId);
       await supabase.from("vote_records").delete().eq("poll_id", editId);
     } else {
@@ -1111,6 +1156,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         category_id: categoryId,
         resolved: false,
         correct_options: [],
+        starts_at: startsAt,
+        ends_at: endsAt,
       });
     }
     closeForm();
@@ -1238,6 +1285,30 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
             + 選択肢を追加
           </button>
 
+          <div style={{ display: "flex", gap: "12px" }}>
+            <div style={{ flex: 1 }}>
+              <label style={styles.label}>公開開始日時（任意）</label>
+              <input
+                type="datetime-local"
+                style={styles.input}
+                value={form.startsAt}
+                onChange={(e) => setForm({ ...form, startsAt: e.target.value })}
+              />
+            </div>
+            <div style={{ flex: 1 }}>
+              <label style={styles.label}>公開終了日時（任意）</label>
+              <input
+                type="datetime-local"
+                style={styles.input}
+                value={form.endsAt}
+                onChange={(e) => setForm({ ...form, endsAt: e.target.value })}
+              />
+            </div>
+          </div>
+          <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
+            空欄のままにすると、今までと同じ「公開する」ボタンでの手動切り替えのみになります
+          </div>
+
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "20px" }}>
             <input
               type="checkbox"
@@ -1267,6 +1338,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         const cat = getCategory(poll.categoryId);
         const isOpen = !!openResolve[poll.id];
         const draft = getDraft(poll);
+        const status = pollStatusLabel(poll);
         return (
           <div key={poll.id} style={styles.card}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "16px" }}>
@@ -1276,9 +1348,14 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
                 <div style={{ fontSize: "12px", color: palette.muted }}>
                   {poll.options.length}択 · {poll.multiple ? "複数選択可" : "単一選択"} · {total}票
                 </div>
+                {(poll.startsAt || poll.endsAt) && (
+                  <div style={{ fontSize: "11px", color: palette.muted, marginTop: "4px" }}>
+                    📅 {poll.startsAt ? formatDateTime(poll.startsAt) : "開始日時未設定"} 〜 {poll.endsAt ? formatDateTime(poll.endsAt) : "終了日時未設定"}
+                  </div>
+                )}
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: "6px", alignItems: "flex-end" }}>
-                <span style={styles.badge(poll.active)}>{poll.active ? "公開中" : "非公開"}</span>
+                <span style={{ ...styles.badge(true), color: status.color, border: `1px solid ${status.color}`, background: "transparent" }}>{status.text}</span>
                 {poll.resolved && (
                   <span style={{ ...styles.badge(true), background: "rgba(232,255,71,0.12)", color: palette.accent, border: `1px solid ${palette.accent}` }}>
                     🎯 正解設定済み
