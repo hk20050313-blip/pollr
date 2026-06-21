@@ -62,6 +62,7 @@ function buildCommentTree(flat, likedIds) {
     byId[c.id] = {
       id: c.id,
       author: c.author,
+      avatarUrl: c.avatar_url || null,
       text: c.text,
       ts: new Date(c.created_at).getTime(),
       likes: c.likes,
@@ -559,7 +560,11 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
     <div>
       <div style={styles.commentCard}>
         <div style={styles.commentMeta}>
-          <span style={styles.avatar(color)}>{initials(comment.author)}</span>
+          {comment.avatarUrl ? (
+            <img src={comment.avatarUrl} alt="" style={{ ...styles.avatar(color), objectFit: "cover", padding: 0 }} />
+          ) : (
+            <span style={styles.avatar(color)}>{initials(comment.author)}</span>
+          )}
           <span style={styles.commentAuthor}>{comment.author}</span>
           <span style={styles.commentTime}>{timeAgo(comment.ts)}</span>
         </div>
@@ -602,7 +607,7 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
   );
 }
 
-function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayName, onRequestLogin }) {
+function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayName, avatarUrl, onRequestLogin }) {
   const category = data.categories.find((c) => c.id === categoryId);
   const [text, setText] = useState("");
   const relatedPolls = data.polls.filter((p) => p.categoryId === categoryId);
@@ -620,13 +625,13 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
     if (!session || !text.trim()) return;
     const t = text.trim();
     setText("");
-    await supabase.from("comments").insert({ category_id: categoryId, author: displayName, text: t, likes: 0 });
+    await supabase.from("comments").insert({ category_id: categoryId, author: displayName, avatar_url: avatarUrl || null, text: t, likes: 0 });
     await refresh();
   };
 
   const handleReply = async (parentId, replyText) => {
     if (!session) return;
-    await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, text: replyText, likes: 0 });
+    await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, avatar_url: avatarUrl || null, text: replyText, likes: 0 });
     await refresh();
   };
 
@@ -1466,6 +1471,144 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
 }
 
 
+// ─── プロフィール設定画面 ───────────────────────────────────────
+function ProfileScreen({ session, profile, onProfileUpdated, onBack }) {
+  const [displayName, setDisplayName] = useState(profile?.display_name || "");
+  const [bio, setBio] = useState(profile?.bio || "");
+  const [email, setEmail] = useState(session?.user?.email || "");
+  const [avatarPreview, setAvatarPreview] = useState(profile?.avatar_url || null);
+  const [uploading, setUploading] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingEmail, setSavingEmail] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const handleAvatarChange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setUploading(true);
+    setError("");
+    const ext = file.name.includes(".") ? file.name.split(".").pop() : "jpg";
+    const path = `${session.user.id}/avatar.${ext}`;
+    const { error: uploadError } = await supabase.storage.from("avatars").upload(path, file, { upsert: true });
+    if (uploadError) {
+      setError(uploadError.message);
+      setUploading(false);
+      return;
+    }
+    const { data: urlData } = supabase.storage.from("avatars").getPublicUrl(path);
+    const cacheBusted = `${urlData.publicUrl}?t=${Date.now()}`;
+    await supabase.from("profiles").update({ avatar_url: cacheBusted }).eq("id", session.user.id);
+    setAvatarPreview(cacheBusted);
+    setUploading(false);
+    onProfileUpdated && onProfileUpdated();
+  };
+
+  const saveProfile = async () => {
+    if (!displayName.trim()) {
+      setError("表示名を入力してください");
+      return;
+    }
+    setSavingProfile(true);
+    setError("");
+    setMessage("");
+    const { error: saveError } = await supabase
+      .from("profiles")
+      .update({ display_name: displayName.trim(), bio: bio.trim() })
+      .eq("id", session.user.id);
+    setSavingProfile(false);
+    if (saveError) {
+      setError(saveError.message);
+      return;
+    }
+    setMessage("プロフィールを更新しました");
+    onProfileUpdated && onProfileUpdated();
+  };
+
+  const saveEmail = async () => {
+    if (!email.trim()) return;
+    setSavingEmail(true);
+    setError("");
+    setMessage("");
+    const { error: emailError } = await supabase.auth.updateUser({ email: email.trim() });
+    setSavingEmail(false);
+    if (emailError) {
+      setError(emailError.message);
+      return;
+    }
+    setMessage("確認メールを送信しました。新しいメールアドレス宛のリンクをクリックすると変更が完了します。");
+  };
+
+  return (
+    <div style={styles.main}>
+      <button style={styles.backLink} onClick={onBack}>← 戻る</button>
+      <div style={styles.sectionTitle}>プロフィール設定</div>
+
+      <div style={styles.card}>
+        <label style={styles.label}>アイコン画像</label>
+        <div style={{ display: "flex", alignItems: "center", gap: "16px", marginBottom: "20px" }}>
+          <div
+            style={{
+              width: "64px",
+              height: "64px",
+              borderRadius: "50%",
+              overflow: "hidden",
+              background: palette.border,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: "22px",
+              fontWeight: "700",
+              color: palette.accent,
+              flexShrink: 0,
+            }}
+          >
+            {avatarPreview ? (
+              <img src={avatarPreview} alt="avatar" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+            ) : (
+              initials(displayName)
+            )}
+          </div>
+          <label style={{ ...styles.submitBtn, marginTop: 0, cursor: "pointer", display: "inline-block", opacity: uploading ? 0.6 : 1 }}>
+            {uploading ? "アップロード中..." : "画像を選ぶ"}
+            <input type="file" accept="image/*" onChange={handleAvatarChange} style={{ display: "none" }} disabled={uploading} />
+          </label>
+        </div>
+
+        <label style={styles.label}>表示名</label>
+        <input style={styles.input} value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+
+        <label style={styles.label}>自己紹介</label>
+        <textarea
+          style={{ ...styles.textarea, width: "100%", boxSizing: "border-box", marginBottom: "16px" }}
+          rows={3}
+          value={bio}
+          onChange={(e) => setBio(e.target.value)}
+          placeholder="自己紹介（任意）"
+        />
+
+        <button style={{ ...styles.submitBtn, opacity: savingProfile ? 0.6 : 1 }} onClick={saveProfile} disabled={savingProfile}>
+          {savingProfile ? "保存中..." : "プロフィールを保存"}
+        </button>
+      </div>
+
+      <div style={styles.card}>
+        <label style={styles.label}>メールアドレス</label>
+        <input style={styles.input} type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <button style={{ ...styles.submitBtn, opacity: savingEmail ? 0.6 : 1 }} onClick={saveEmail} disabled={savingEmail}>
+          {savingEmail ? "送信中..." : "メールアドレスを変更"}
+        </button>
+        <div style={{ fontSize: "11px", color: palette.muted, marginTop: "10px" }}>
+          変更後、新しいメールアドレス宛に確認メールが届きます。リンクをクリックするまで現在のメールアドレスのままです。
+        </div>
+      </div>
+
+      {message && <div style={{ color: palette.green, fontSize: "13px", marginTop: "8px" }}>{message}</div>}
+      {error && <div style={{ color: palette.danger, fontSize: "13px", marginTop: "8px" }}>{error}</div>}
+    </div>
+  );
+}
+
 // ─── ROOT ────────────────────────────────────────────────────────
 export default function App() {
   const [tab, setTab] = useState("vote");
@@ -1475,6 +1618,7 @@ export default function App() {
   const [session, setSession] = useState(null);
   const [profile, setProfile] = useState(null);
   const [showAuthForm, setShowAuthForm] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
   const [adminUnlocked, setAdminUnlocked] = useState(() => {
     try {
       return localStorage.getItem(ADMIN_UNLOCK_KEY) === "true";
@@ -1506,17 +1650,17 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  useEffect(() => {
+  const refreshProfile = async () => {
     if (!session) {
       setProfile(null);
       return;
     }
-    supabase
-      .from("profiles")
-      .select("*")
-      .eq("id", session.user.id)
-      .maybeSingle()
-      .then(({ data }) => setProfile(data));
+    const { data } = await supabase.from("profiles").select("*").eq("id", session.user.id).maybeSingle();
+    setProfile(data);
+  };
+
+  useEffect(() => {
+    refreshProfile();
   }, [session]);
 
   useEffect(() => {
@@ -1533,6 +1677,7 @@ export default function App() {
     await supabase.auth.signOut();
   };
   const displayName = profile?.display_name || session?.user?.email || "ゲスト";
+  const avatarUrl = profile?.avatar_url || null;
 
   if (error) {
     return (
@@ -1565,7 +1710,12 @@ export default function App() {
           </div>
           {session ? (
             <div style={{ display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }}>
-              <span style={{ color: palette.accent }}>{displayName}</span>
+              <button
+                style={{ background: "none", border: "none", color: palette.accent, cursor: "pointer", fontFamily: "inherit", fontSize: "12px", padding: 0 }}
+                onClick={() => setShowProfile(true)}
+              >
+                {displayName}
+              </button>
               <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "11px" }} onClick={handleLogout}>
                 ログアウト
               </button>
@@ -1587,7 +1737,7 @@ export default function App() {
         </div>
       )}
 
-      {activeRoom === null && (
+      {activeRoom === null && !showProfile && (
         <div style={styles.tabBar}>
           <button style={styles.tab(tab === "vote")} onClick={() => setTab("vote")}>投票する</button>
           <button style={styles.tab(tab === "record")} onClick={() => setTab("record")}>🎯 成績</button>
@@ -1595,8 +1745,10 @@ export default function App() {
         </div>
       )}
 
-      {activeRoom !== null ? (
-        <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} session={session} displayName={displayName} onRequestLogin={requestLogin} />
+      {showProfile ? (
+        <ProfileScreen session={session} profile={profile} onProfileUpdated={refreshProfile} onBack={() => setShowProfile(false)} />
+      ) : activeRoom !== null ? (
+        <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} session={session} displayName={displayName} avatarUrl={avatarUrl} onRequestLogin={requestLogin} />
       ) : tab === "vote" ? (
         <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} session={session} onRequestLogin={requestLogin} />
       ) : tab === "record" ? (
