@@ -62,7 +62,21 @@ function pointsForRecord(poll, selectedOptions) {
   return correct ? (poll.correctPoints || 0) : -(poll.incorrectPoints || 0);
 }
 
-// 全ユーザーの的中率・ポイントを集計する（管理画面用）
+// 総合スコア（的中率＋鋭い視点レートの合算）関連
+// 重みは意図的に非公開にする（ユーザーには「両方を反映する」とだけ伝える）
+const MIN_SCORE_SAMPLE = 10;
+const SCORE_WEIGHT_CORRECT = 0.6;
+const SCORE_WEIGHT_INSIGHT = 0.4;
+
+function computeCombinedScore(total, correctCount, reasonsWritten, reasonsWithInsight) {
+  if (total < MIN_SCORE_SAMPLE) return null;
+  const rate = total > 0 ? (correctCount / total) * 100 : 0;
+  const insightRate = reasonsWritten > 0 ? (reasonsWithInsight / reasonsWritten) * 100 : null;
+  const score = insightRate !== null ? rate * SCORE_WEIGHT_CORRECT + insightRate * SCORE_WEIGHT_INSIGHT : rate;
+  return Math.round(score);
+}
+
+// 全ユーザーの的中率・ポイント・総合スコアを集計する（管理画面用）
 function computeLeaderboard(data) {
   const byUser = {};
   (data.voteRecords || []).forEach((r) => {
@@ -70,22 +84,31 @@ function computeLeaderboard(data) {
     if (!poll) return;
     const correct = isCorrectSelection(poll, r.selectedOptions);
     if (correct === null) return; // まだ正解未確定の質問は集計しない
-    if (!byUser[r.voterId]) byUser[r.voterId] = { voterId: r.voterId, total: 0, correctCount: 0, points: 0 };
+    if (!byUser[r.voterId]) byUser[r.voterId] = { voterId: r.voterId, total: 0, correctCount: 0, points: 0, reasonsWritten: 0, reasonsWithInsight: 0 };
     byUser[r.voterId].total += 1;
     if (correct) byUser[r.voterId].correctCount += 1;
     byUser[r.voterId].points += pointsForRecord(poll, r.selectedOptions) || 0;
+    if (r.reason && r.reason.trim()) {
+      byUser[r.voterId].reasonsWritten += 1;
+      if (insightCountFor(data, r.id) > 0) byUser[r.voterId].reasonsWithInsight += 1;
+    }
   });
 
   const profileMap = {};
   (data.profiles || []).forEach((p) => { profileMap[p.id] = p; });
 
   return Object.values(byUser)
-    .map((u) => ({
-      ...u,
-      displayName: profileMap[u.voterId]?.display_name || "（不明なユーザー）",
-      avatarUrl: profileMap[u.voterId]?.avatar_url || null,
-      rate: u.total > 0 ? Math.round((u.correctCount / u.total) * 100) : 0,
-    }))
+    .map((u) => {
+      const insightRate = u.reasonsWritten > 0 ? Math.round((u.reasonsWithInsight / u.reasonsWritten) * 100) : null;
+      return {
+        ...u,
+        displayName: profileMap[u.voterId]?.display_name || "（不明なユーザー）",
+        avatarUrl: profileMap[u.voterId]?.avatar_url || null,
+        rate: u.total > 0 ? Math.round((u.correctCount / u.total) * 100) : 0,
+        insightRate,
+        combinedScore: computeCombinedScore(u.total, u.correctCount, u.reasonsWritten, u.reasonsWithInsight),
+      };
+    })
     .sort((a, b) => b.points - a.points);
 }
 
@@ -1450,6 +1473,14 @@ function AdminLeaderboard({ data }) {
         <div style={{ color: palette.muted, fontSize: "13px" }}>まだ正解が確定した質問への投票がありません。</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", padding: "0 12px", fontSize: "10px", color: palette.muted, letterSpacing: "0.05em" }}>
+            <div style={{ width: "24px" }} />
+            <div style={{ width: "32px" }} />
+            <div style={{ flex: 1 }}>ユーザー</div>
+            <div>件数 / 的中率</div>
+            <div style={{ minWidth: "50px", textAlign: "right" }}>総合</div>
+            <div style={{ minWidth: "60px", textAlign: "right" }}>ポイント</div>
+          </div>
           {leaderboard.map((u, i) => (
             <div
               key={u.voterId}
@@ -1481,6 +1512,9 @@ function AdminLeaderboard({ data }) {
               <div style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{u.displayName}</div>
               <div style={{ fontSize: "11px", color: palette.muted }}>
                 {u.total}件 / 的中{u.correctCount}件（{u.rate}%）
+              </div>
+              <div style={{ fontSize: "13px", fontWeight: "800", color: "#c792ff", minWidth: "50px", textAlign: "right" }}>
+                {u.combinedScore !== null ? u.combinedScore : "ー"}
               </div>
               <div style={{ fontSize: "13px", fontWeight: "800", color: u.points >= 0 ? palette.green : palette.danger, minWidth: "60px", textAlign: "right" }}>
                 {u.points >= 0 ? `+${u.points}` : u.points}pt
@@ -1946,12 +1980,25 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
   const reasonsWritten = resolvedHistory.filter((h) => h.record.reason && h.record.reason.trim());
   const reasonsWithInsight = reasonsWritten.filter((h) => insightCountFor(data, h.record.id) > 0);
   const insightRate = reasonsWritten.length > 0 ? Math.round((reasonsWithInsight.length / reasonsWritten.length) * 100) : null;
+  const combinedScore = computeCombinedScore(total, correctCount, reasonsWritten.length, reasonsWithInsight.length);
 
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
 
   return (
     <div style={styles.main}>
       <div style={styles.sectionTitle}>成績 — 的中率トラッキング</div>
+
+      <div style={{ ...styles.card, textAlign: "center", padding: "28px 20px" }}>
+        <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginBottom: "8px" }}>総合スコア</div>
+        <div style={{ fontSize: "42px", fontWeight: "800", color: "#c792ff" }}>
+          {combinedScore !== null ? combinedScore : "ー"}
+        </div>
+        <div style={{ fontSize: "11px", color: palette.muted, marginTop: "8px", lineHeight: 1.6 }}>
+          {combinedScore !== null
+            ? "的中率と鋭い視点レート、両方を反映したスコアです（コメント数や投票数自体では上がりません）"
+            : `確定済みの予測が${MIN_SCORE_SAMPLE}件以上になると表示されます（現在${total}件）`}
+        </div>
+      </div>
 
       <div style={{ ...styles.card, display: "flex", gap: "24px", flexWrap: "wrap" }}>
         <div style={{ flex: "1 1 100px" }}>
