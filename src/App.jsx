@@ -166,6 +166,25 @@ function hasRatedInsight(data, voteRecordId, raterId) {
   return (data.insightVotes || []).some((v) => v.voteRecordId === voteRecordId && v.raterId === raterId);
 }
 
+// ─── 議論コメントの評価（鋭い視点・Δ）関連のヘルパー ──────────────
+function commentEvalCount(data, commentId, kind) {
+  return (data.commentEvaluations || []).filter((e) => e.commentId === commentId && e.kind === kind).length;
+}
+
+function hasRatedComment(data, commentId, raterId, kind) {
+  return (data.commentEvaluations || []).some((e) => e.commentId === commentId && e.raterId === raterId && e.kind === kind);
+}
+
+// ネストしたコメントツリーをフラットな配列に展開する（スレッド参加判定などに使う）
+function flattenComments(list) {
+  let out = [];
+  (list || []).forEach((c) => {
+    out.push(c);
+    if (c.replies && c.replies.length) out = out.concat(flattenComments(c.replies));
+  });
+  return out;
+}
+
 // ISO文字列 ⇔ <input type="datetime-local"> の値（ローカル時刻）の変換
 function toDatetimeLocalValue(isoString) {
   if (!isoString) return "";
@@ -187,6 +206,7 @@ function buildCommentTree(flat, likedIds) {
       id: c.id,
       author: c.author,
       avatarUrl: c.avatar_url || null,
+      userId: c.user_id || null,
       text: c.text,
       ts: new Date(c.created_at).getTime(),
       likes: c.likes,
@@ -207,7 +227,7 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes, commentEvalRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
@@ -215,6 +235,7 @@ async function fetchAllData() {
     supabase.from("profiles").select("*"),
     supabase.from("posts").select("*").order("created_at", { ascending: false }),
     supabase.from("insight_votes").select("*"),
+    supabase.from("comment_evaluations").select("*"),
   ]);
 
   if (catsRes.error) throw catsRes.error;
@@ -224,6 +245,7 @@ async function fetchAllData() {
   if (profilesRes.error) throw profilesRes.error;
   if (postsRes.error) throw postsRes.error;
   if (insightRes.error) throw insightRes.error;
+  if (commentEvalRes.error) throw commentEvalRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
@@ -285,7 +307,7 @@ async function fetchAllData() {
     raterId: v.rater_id,
   }));
 
-  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes };
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes, commentEvaluations: commentEvalRes.data.map((e) => ({ id: e.id, commentId: e.comment_id, raterId: e.rater_id, kind: e.kind })) };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -690,7 +712,7 @@ function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
 
-function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin, depth = 0 }) {
+function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, session, onRequestLogin, iCommentedHere, depth = 0 }) {
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
 
@@ -711,6 +733,14 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
     setReplying((r) => !r);
   };
 
+  const isMine = session && comment.userId === session.user.id;
+  const insightCount = commentEvalCount(data, comment.id, "insight");
+  const deltaCount = commentEvalCount(data, comment.id, "delta");
+  const ratedInsight = session && hasRatedComment(data, comment.id, session.user.id, "insight");
+  const ratedDelta = session && hasRatedComment(data, comment.id, session.user.id, "delta");
+  const canEvalInsight = session && !isMine && iCommentedHere && !ratedInsight;
+  const canEvalDelta = session && !isMine && iCommentedHere && !ratedDelta;
+
   return (
     <div>
       <div style={styles.commentCard}>
@@ -727,6 +757,20 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
         <div style={styles.commentActions}>
           <button style={styles.actionBtn(comment.liked)} onClick={() => onLike(comment.id, comment.likes, comment.liked)}>
             {comment.liked ? "❤" : "♡"} {comment.likes}
+          </button>
+          <button
+            style={{ ...styles.actionBtn(ratedInsight), opacity: canEvalInsight || ratedInsight ? 1 : 0.4, cursor: canEvalInsight ? "pointer" : "default" }}
+            onClick={() => canEvalInsight && onEvaluate(comment.id, "insight")}
+            disabled={!canEvalInsight}
+          >
+            💡 鋭い視点 {insightCount}
+          </button>
+          <button
+            style={{ ...styles.actionBtn(ratedDelta), opacity: canEvalDelta || ratedDelta ? 1 : 0.4, cursor: canEvalDelta ? "pointer" : "default" }}
+            onClick={() => canEvalDelta && onEvaluate(comment.id, "delta")}
+            disabled={!canEvalDelta}
+          >
+            Δ 意見が変わった {deltaCount}
           </button>
           <button style={styles.actionBtn(false)} onClick={clickReply}>
             ↩ 返信
@@ -754,7 +798,19 @@ function CommentItem({ comment, color, onReply, onLike, session, onRequestLogin,
       {comment.replies && comment.replies.length > 0 && (
         <div style={styles.replyBox}>
           {comment.replies.map((r) => (
-            <CommentItem key={r.id} comment={r} color={color} onReply={onReply} onLike={onLike} session={session} onRequestLogin={onRequestLogin} depth={depth + 1} />
+            <CommentItem
+              key={r.id}
+              comment={r}
+              color={color}
+              onReply={onReply}
+              onLike={onLike}
+              onEvaluate={onEvaluate}
+              data={data}
+              session={session}
+              onRequestLogin={onRequestLogin}
+              iCommentedHere={iCommentedHere}
+              depth={depth + 1}
+            />
           ))}
         </div>
       )}
@@ -780,7 +836,7 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
   const postComment = async () => {
     if (!session || !text.trim()) return;
     setPostError("");
-    const { error } = await supabase.from("comments").insert({ category_id: categoryId, author: displayName, avatar_url: avatarUrl || null, text: text.trim(), likes: 0 });
+    const { error } = await supabase.from("comments").insert({ category_id: categoryId, author: displayName, avatar_url: avatarUrl || null, user_id: session.user.id, text: text.trim(), likes: 0 });
     if (error) {
       setPostError("投稿に失敗しました： " + error.message);
       return;
@@ -791,7 +847,7 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
 
   const handleReply = async (parentId, replyText) => {
     if (!session) return false;
-    const { error } = await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, avatar_url: avatarUrl || null, text: replyText, likes: 0 });
+    const { error } = await supabase.from("comments").insert({ category_id: categoryId, parent_id: parentId, author: displayName, avatar_url: avatarUrl || null, user_id: session.user.id, text: replyText, likes: 0 });
     if (error) {
       alert("返信の投稿に失敗しました： " + error.message);
       return false;
@@ -814,7 +870,18 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
     await refresh();
   };
 
+  const handleEvaluate = async (commentId, kind) => {
+    if (!session) return;
+    const { error } = await supabase.from("comment_evaluations").insert({ comment_id: commentId, rater_id: session.user.id, kind });
+    if (error) {
+      alert("評価に失敗しました： " + error.message);
+      return;
+    }
+    await refresh();
+  };
+
   const comments = category.comments || [];
+  const iCommentedHere = !!(session && flattenComments(comments).some((c) => c.userId === session.user.id));
   const countAll = (list) => list.reduce((sum, c) => sum + 1 + countAll(c.replies || []), 0);
 
   return (
@@ -826,9 +893,12 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
         <span style={{ ...styles.numBadge(category.color), fontSize: "13px" }}>#{category.number}</span>
         <span style={{ fontSize: "20px", fontWeight: "800" }}>{category.name}</span>
       </div>
-      <div style={{ ...styles.sectionTitle, marginBottom: "24px" }}>
+      <div style={{ ...styles.sectionTitle, marginBottom: "12px" }}>
         議論ルーム · {countAll(comments)}件のコメント
         {relatedPolls.length > 0 && ` · 関連する質問 ${relatedPolls.length}件`}
+      </div>
+      <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "24px", lineHeight: 1.6 }}>
+        💡 鋭い視点・Δ（意見が変わった）は、このスレッドに自分もコメントした人だけが他の人の発言に付けられます。自分のコメントには付けられません。
       </div>
 
       {session ? (
@@ -858,7 +928,18 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
         </div>
       ) : (
         comments.map((c) => (
-          <CommentItem key={c.id} comment={c} color={category.color} onReply={handleReply} onLike={handleLike} session={session} onRequestLogin={onRequestLogin} />
+          <CommentItem
+            key={c.id}
+            comment={c}
+            color={category.color}
+            onReply={handleReply}
+            onLike={handleLike}
+            onEvaluate={handleEvaluate}
+            data={data}
+            session={session}
+            onRequestLogin={onRequestLogin}
+            iCommentedHere={iCommentedHere}
+          />
         ))
       )}
     </div>
