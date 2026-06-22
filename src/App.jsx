@@ -930,9 +930,17 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
         </div>
       )}
 
+      {relatedPolls.length > 0 && (
+        <div style={{ marginBottom: "28px" }}>
+          <div style={{ ...styles.sectionTitle, marginBottom: "16px" }}>このテーマの質問 — {relatedPolls.length}件</div>
+          {relatedPolls.map((poll) => (
+            <PollCard key={poll.id} poll={poll} data={data} refresh={refresh} onOpenRoom={onOpenRoom} session={session} onRequestLogin={onRequestLogin} />
+          ))}
+        </div>
+      )}
+
       <div style={{ ...styles.sectionTitle, marginBottom: "12px" }}>
         議論ルーム · {countAll(comments)}件のコメント
-        {relatedPolls.length > 0 && ` · 関連する質問 ${relatedPolls.length}件`}
       </div>
       <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "24px", lineHeight: 1.6 }}>
         💡 鋭い視点・Δ（意見が変わった）は、このスレッドに自分もコメントした人だけが他の人の発言に付けられます。自分のコメントには付けられません。
@@ -1206,53 +1214,42 @@ function FeedScreen({ data, refresh, session, displayName, avatarUrl, onRequestL
   );
 }
 
-function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
+// ─── 質問1問分の表示・投票ロジック（投票画面・議論ルームの両方から使う） ──
+function PollCard({ poll, data, refresh, onOpenRoom, session, onRequestLogin }) {
   const voterId = session ? session.user.id : null;
-  const [filterCat, setFilterCat] = useState(null);
+  const myRecord = (data.voteRecords || []).find((r) => r.pollId === poll.id && r.voterId === voterId);
 
-  const initialState = () => {
-    const sel = {};
-    const vd = {};
-    (data.voteRecords || []).forEach((r) => {
-      if (r.voterId === voterId) {
-        sel[r.pollId] = r.selectedOptions;
-        vd[r.pollId] = true;
-      }
-    });
-    return { sel, vd };
-  };
-  const [selections, setSelections] = useState(() => initialState().sel);
-  const [voted, setVoted] = useState(() => initialState().vd);
-  const [reasons, setReasons] = useState({});
-  const [editingPollId, setEditingPollId] = useState(null);
+  const [selections, setSelections] = useState(() => (myRecord ? myRecord.selectedOptions : []));
+  const [voted, setVoted] = useState(() => !!myRecord);
+  const [reason, setReason] = useState("");
+  const [editingReason, setEditingReason] = useState(false);
   const [editText, setEditText] = useState("");
 
-  const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
-  const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
+  const cat = data.categories.find((c) => c.id === poll.categoryId) || null;
+  const didVote = voted;
+  const sel = selections;
+  const total = poll.votes.reduce((a, b) => a + b, 0) + (didVote ? sel.length : 0);
 
-  const toggle = (pollId, idx, multiple) => {
-    if (voted[pollId]) return;
-    setSelections((prev) => {
-      const cur = prev[pollId] || [];
+  const toggle = (idx, multiple) => {
+    if (voted) return;
+    setSelections((cur) => {
       if (multiple) {
-        return { ...prev, [pollId]: cur.includes(idx) ? cur.filter((i) => i !== idx) : [...cur, idx] };
+        return cur.includes(idx) ? cur.filter((i) => i !== idx) : [...cur, idx];
       } else {
-        return { ...prev, [pollId]: cur.includes(idx) ? [] : [idx] };
+        return cur.includes(idx) ? [] : [idx];
       }
     });
   };
 
-  const submitVote = async (poll) => {
+  const submitVote = async () => {
     if (!session) return;
-    const sel = selections[poll.id] || [];
     if (sel.length === 0) return;
-    const reason = (reasons[poll.id] || "").trim();
-    const { error } = await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel, reason: reason || null });
+    const { error } = await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel, reason: reason.trim() || null });
     if (error) {
       alert("投票に失敗しました： " + error.message);
       return;
     }
-    setVoted((prev) => ({ ...prev, [poll.id]: true }));
+    setVoted(true);
     await refresh();
   };
 
@@ -1272,9 +1269,211 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
       alert("理由の更新に失敗しました： " + error.message);
       return;
     }
-    setEditingPollId(null);
+    setEditingReason(false);
     await refresh();
   };
+
+  return (
+    <div style={styles.card}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <CategoryTag category={cat} onOpenRoom={onOpenRoom} />
+        <div style={{ ...styles.sectionTitle, marginBottom: "12px" }}>
+          {poll.multiple ? "複数選択可" : "単一選択"}
+        </div>
+      </div>
+      <div style={styles.questionText}>{poll.question}</div>
+      <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
+        🏆 正解 +{poll.correctPoints}pt ／ 不正解 -{poll.incorrectPoints}pt
+      </div>
+
+      {didVote ? (
+        <div>
+          <div style={{ ...styles.sectionTitle, marginBottom: "16px", color: palette.green }}>
+            ✓ 投票完了 — 結果
+          </div>
+
+          {!poll.resolved && myRecord && (() => {
+            const editable = canEditReason(poll);
+            return (
+              <div style={{ marginBottom: "16px", padding: "12px 14px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
+                <div style={{ fontSize: "11px", color: editable ? palette.muted : palette.danger, marginBottom: "8px" }}>
+                  あなたの理由 ・ {editable
+                    ? `💬 ${poll.reasonLockAt ? `${formatDateTime(poll.reasonLockAt)}まで編集できます` : "結果確定までは自由に編集できます。確定後は変更できなくなるのでご注意ください。"}`
+                    : "🔒 変更期限を過ぎました。これ以降は編集できません。"}
+                </div>
+                {editingReason && editable ? (
+                  <div>
+                    <textarea
+                      style={{ ...styles.textarea, width: "100%", boxSizing: "border-box" }}
+                      rows={2}
+                      value={editText}
+                      onChange={(e) => setEditText(e.target.value)}
+                      autoFocus
+                    />
+                    <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                      <button style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }} onClick={() => updateReason(myRecord, editText.trim())}>
+                        保存
+                      </button>
+                      <button
+                        style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
+                        onClick={() => setEditingReason(false)}
+                      >
+                        キャンセル
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div>
+                    <div style={{ fontSize: "13px", marginBottom: "8px" }}>
+                      {myRecord.reason ? myRecord.reason : <span style={{ color: palette.muted }}>（理由はまだ書かれていません）</span>}
+                    </div>
+                    {editable && (
+                      <div style={{ display: "flex", gap: "8px" }}>
+                        <button
+                          style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }}
+                          onClick={() => { setEditingReason(true); setEditText(myRecord.reason || ""); }}
+                        >
+                          {myRecord.reason ? "編集" : "理由を追加"}
+                        </button>
+                        {myRecord.reason && (
+                          <button
+                            style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.danger, border: `1px solid ${palette.danger}` }}
+                            onClick={() => updateReason(myRecord, null)}
+                          >
+                            削除
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {poll.resolved && (() => {
+            const correct = isCorrectSelection(poll, sel);
+            const pts = pointsForRecord(poll, sel);
+            return (
+              <div
+                style={{
+                  marginBottom: "16px",
+                  padding: "10px 14px",
+                  borderRadius: "3px",
+                  fontSize: "12px",
+                  fontWeight: "700",
+                  letterSpacing: "0.04em",
+                  background: correct ? "rgba(77,255,145,0.1)" : "rgba(255,77,77,0.1)",
+                  color: correct ? palette.green : palette.danger,
+                  border: `1px solid ${correct ? palette.green : palette.danger}`,
+                }}
+              >
+                {correct ? "🎯 的中！あなたの予測は正解でした" : "✗ 不正解でした"}　{pts >= 0 ? `+${pts}` : pts}pt
+              </div>
+            );
+          })()}
+
+          {poll.options.map((opt, i) => {
+            const v = poll.votes[i] + (sel.includes(i) ? 1 : 0);
+            const pct = total > 0 ? Math.round((v / total) * 100) : 0;
+            const isSelected = sel.includes(i);
+            const isCorrectOpt = poll.resolved && (poll.correctOptions || []).includes(i);
+            const barColor = isCorrectOpt ? palette.green : isSelected ? palette.accent : palette.muted;
+            return (
+              <div key={i} style={{ marginBottom: "14px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "13px" }}>
+                  <span style={{ color: isCorrectOpt ? palette.green : isSelected ? palette.accent : palette.text }}>
+                    {isCorrectOpt && "🎯 "}{opt}{isSelected && <span style={{ color: palette.muted }}> （あなたの回答）</span>}
+                  </span>
+                  <span style={{ color: palette.muted }}>{pct}% ({v}票)</span>
+                </div>
+                <div style={{ background: palette.border, borderRadius: "2px", height: "8px" }}>
+                  <div style={styles.resultBar(pct, barColor)} />
+                </div>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: "12px", color: palette.muted, marginTop: "12px" }}>
+            合計 {total} 票{!poll.resolved && " · 正解発表をお待ちください"}
+          </div>
+
+          {poll.resolved && (() => {
+            const reasonRecords = (data.voteRecords || []).filter((r) => r.pollId === poll.id && r.reason && r.reason.trim());
+            if (reasonRecords.length === 0) return null;
+            const periodOpen = isInsightPeriodOpen(poll);
+            return (
+              <div style={{ marginTop: "20px", borderTop: `1px solid ${palette.border}`, paddingTop: "16px" }}>
+                <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginBottom: "12px" }}>
+                  💡 みんなの理由（{reasonRecords.length}件）{!periodOpen && " · 評価期間は終了しました"}
+                </div>
+                {reasonRecords.map((r) => {
+                  const isMine = session && r.voterId === session.user.id;
+                  const iVotedThisPoll = session && (data.voteRecords || []).some((vr) => vr.pollId === poll.id && vr.voterId === session.user.id);
+                  const alreadyRated = session && hasRatedInsight(data, r.id, session.user.id);
+                  const count = insightCountFor(data, r.id);
+                  const canRate = session && !isMine && iVotedThisPoll && periodOpen && !alreadyRated;
+                  return (
+                    <div key={r.id} style={{ ...styles.commentCard, marginBottom: "10px" }}>
+                      <div style={styles.commentMeta}>
+                        {getProfileAvatar(data, r.voterId) ? (
+                          <img src={getProfileAvatar(data, r.voterId)} alt="" style={{ ...styles.avatar(palette.accent), objectFit: "cover" }} />
+                        ) : (
+                          <span style={styles.avatar(palette.accent)}>{initials(getProfileName(data, r.voterId))}</span>
+                        )}
+                        <span style={styles.commentAuthor}>{getProfileName(data, r.voterId)}</span>
+                        <span style={{ fontSize: "11px", color: palette.muted }}>{r.selectedOptions.map((i) => poll.options[i]).join("、")}を選択</span>
+                        {isMine && <span style={{ fontSize: "11px", color: palette.muted }}>・🔒 確定済み（あなたの理由）</span>}
+                      </div>
+                      <div style={styles.commentBody}>{r.reason}</div>
+                      <div style={styles.commentActions}>
+                        <button
+                          style={{ ...styles.actionBtn(alreadyRated), opacity: canRate || alreadyRated ? 1 : 0.4, cursor: canRate ? "pointer" : "default" }}
+                          onClick={() => canRate && handleInsight(r)}
+                          disabled={!canRate}
+                        >
+                          💡 鋭い視点 {count}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
+        </div>
+      ) : !session ? (
+        <LoginPrompt message="投票するにはログインが必要です" onRequestLogin={onRequestLogin} />
+      ) : (
+        <div>
+          {poll.options.map((opt, i) => (
+            <button key={i} style={styles.optionBtn(sel.includes(i))} onClick={() => toggle(i, poll.multiple)}>
+              <span style={styles.dot(sel.includes(i))} />
+              {opt}
+            </button>
+          ))}
+          <textarea
+            style={{ ...styles.textarea, width: "100%", boxSizing: "border-box", marginTop: "8px" }}
+            rows={2}
+            placeholder="そう思う理由を書く（任意・結果確定後に他の投票者に公開されます）"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+          <button
+            style={{ ...styles.submitBtn, opacity: sel.length === 0 ? 0.4 : 1, cursor: sel.length === 0 ? "not-allowed" : "pointer" }}
+            onClick={submitVote}
+            disabled={sel.length === 0}
+          >
+            投票する
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
+  const [filterCat, setFilterCat] = useState(null);
+  const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
 
   return (
     <div style={styles.main}>
@@ -1292,210 +1491,9 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
           </div>
         </div>
       ) : (
-        activePolls.map((poll) => {
-          const didVote = !!voted[poll.id];
-          const sel = selections[poll.id] || [];
-          const total = poll.votes.reduce((a, b) => a + b, 0) + (didVote ? sel.length : 0);
-          const cat = getCategory(poll.categoryId);
-          const myRecord = (data.voteRecords || []).find((r) => r.pollId === poll.id && r.voterId === voterId);
-
-          return (
-            <div key={poll.id} style={styles.card}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <CategoryTag category={cat} onOpenRoom={onOpenRoom} />
-                <div style={{ ...styles.sectionTitle, marginBottom: "12px" }}>
-                  {poll.multiple ? "複数選択可" : "単一選択"}
-                </div>
-              </div>
-              <div style={styles.questionText}>{poll.question}</div>
-              <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
-                🏆 正解 +{poll.correctPoints}pt ／ 不正解 -{poll.incorrectPoints}pt
-              </div>
-
-              {didVote ? (
-                <div>
-                  <div style={{ ...styles.sectionTitle, marginBottom: "16px", color: palette.green }}>
-                    ✓ 投票完了 — 結果
-                  </div>
-
-                  {!poll.resolved && myRecord && (() => {
-                    const editable = canEditReason(poll);
-                    return (
-                      <div style={{ marginBottom: "16px", padding: "12px 14px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
-                        <div style={{ fontSize: "11px", color: editable ? palette.muted : palette.danger, marginBottom: "8px" }}>
-                          あなたの理由 ・ {editable
-                            ? `💬 ${poll.reasonLockAt ? `${formatDateTime(poll.reasonLockAt)}まで編集できます` : "結果確定までは自由に編集できます。確定後は変更できなくなるのでご注意ください。"}`
-                            : "🔒 変更期限を過ぎました。これ以降は編集できません。"}
-                        </div>
-                        {editingPollId === poll.id && editable ? (
-                          <div>
-                            <textarea
-                              style={{ ...styles.textarea, width: "100%", boxSizing: "border-box" }}
-                              rows={2}
-                              value={editText}
-                              onChange={(e) => setEditText(e.target.value)}
-                              autoFocus
-                            />
-                            <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
-                              <button style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }} onClick={() => updateReason(myRecord, editText.trim())}>
-                                保存
-                              </button>
-                              <button
-                                style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
-                                onClick={() => setEditingPollId(null)}
-                              >
-                                キャンセル
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div>
-                            <div style={{ fontSize: "13px", marginBottom: "8px" }}>
-                              {myRecord.reason ? myRecord.reason : <span style={{ color: palette.muted }}>（理由はまだ書かれていません）</span>}
-                            </div>
-                            {editable && (
-                              <div style={{ display: "flex", gap: "8px" }}>
-                                <button
-                                  style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }}
-                                  onClick={() => { setEditingPollId(poll.id); setEditText(myRecord.reason || ""); }}
-                                >
-                                  {myRecord.reason ? "編集" : "理由を追加"}
-                                </button>
-                                {myRecord.reason && (
-                                  <button
-                                    style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.danger, border: `1px solid ${palette.danger}` }}
-                                    onClick={() => updateReason(myRecord, null)}
-                                  >
-                                    削除
-                                  </button>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  {poll.resolved && (() => {
-                    const correct = isCorrectSelection(poll, sel);
-                    const pts = pointsForRecord(poll, sel);
-                    return (
-                      <div
-                        style={{
-                          marginBottom: "16px",
-                          padding: "10px 14px",
-                          borderRadius: "3px",
-                          fontSize: "12px",
-                          fontWeight: "700",
-                          letterSpacing: "0.04em",
-                          background: correct ? "rgba(77,255,145,0.1)" : "rgba(255,77,77,0.1)",
-                          color: correct ? palette.green : palette.danger,
-                          border: `1px solid ${correct ? palette.green : palette.danger}`,
-                        }}
-                      >
-                        {correct ? "🎯 的中！あなたの予測は正解でした" : "✗ 不正解でした"}　{pts >= 0 ? `+${pts}` : pts}pt
-                      </div>
-                    );
-                  })()}
-
-                  {poll.options.map((opt, i) => {
-                    const v = poll.votes[i] + (sel.includes(i) ? 1 : 0);
-                    const pct = total > 0 ? Math.round((v / total) * 100) : 0;
-                    const isSelected = sel.includes(i);
-                    const isCorrectOpt = poll.resolved && (poll.correctOptions || []).includes(i);
-                    const barColor = isCorrectOpt ? palette.green : isSelected ? palette.accent : palette.muted;
-                    return (
-                      <div key={i} style={{ marginBottom: "14px" }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px", fontSize: "13px" }}>
-                          <span style={{ color: isCorrectOpt ? palette.green : isSelected ? palette.accent : palette.text }}>
-                            {isCorrectOpt && "🎯 "}{opt}{isSelected && <span style={{ color: palette.muted }}> （あなたの回答）</span>}
-                          </span>
-                          <span style={{ color: palette.muted }}>{pct}% ({v}票)</span>
-                        </div>
-                        <div style={{ background: palette.border, borderRadius: "2px", height: "8px" }}>
-                          <div style={styles.resultBar(pct, barColor)} />
-                        </div>
-                      </div>
-                    );
-                  })}
-                  <div style={{ fontSize: "12px", color: palette.muted, marginTop: "12px" }}>
-                    合計 {total} 票{!poll.resolved && " · 正解発表をお待ちください"}
-                  </div>
-
-                  {poll.resolved && (() => {
-                    const reasonRecords = (data.voteRecords || []).filter((r) => r.pollId === poll.id && r.reason && r.reason.trim());
-                    if (reasonRecords.length === 0) return null;
-                    const periodOpen = isInsightPeriodOpen(poll);
-                    return (
-                      <div style={{ marginTop: "20px", borderTop: `1px solid ${palette.border}`, paddingTop: "16px" }}>
-                        <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginBottom: "12px" }}>
-                          💡 みんなの理由（{reasonRecords.length}件）{!periodOpen && " · 評価期間は終了しました"}
-                        </div>
-                        {reasonRecords.map((r) => {
-                          const isMine = session && r.voterId === session.user.id;
-                          const iVotedThisPoll = session && (data.voteRecords || []).some((vr) => vr.pollId === poll.id && vr.voterId === session.user.id);
-                          const alreadyRated = session && hasRatedInsight(data, r.id, session.user.id);
-                          const count = insightCountFor(data, r.id);
-                          const canRate = session && !isMine && iVotedThisPoll && periodOpen && !alreadyRated;
-                          return (
-                            <div key={r.id} style={{ ...styles.commentCard, marginBottom: "10px" }}>
-                              <div style={styles.commentMeta}>
-                                {getProfileAvatar(data, r.voterId) ? (
-                                  <img src={getProfileAvatar(data, r.voterId)} alt="" style={{ ...styles.avatar(palette.accent), objectFit: "cover" }} />
-                                ) : (
-                                  <span style={styles.avatar(palette.accent)}>{initials(getProfileName(data, r.voterId))}</span>
-                                )}
-                                <span style={styles.commentAuthor}>{getProfileName(data, r.voterId)}</span>
-                                <span style={{ fontSize: "11px", color: palette.muted }}>{r.selectedOptions.map((i) => poll.options[i]).join("、")}を選択</span>
-                                {isMine && <span style={{ fontSize: "11px", color: palette.muted }}>・🔒 確定済み（あなたの理由）</span>}
-                              </div>
-                              <div style={styles.commentBody}>{r.reason}</div>
-                              <div style={styles.commentActions}>
-                                <button
-                                  style={{ ...styles.actionBtn(alreadyRated), opacity: canRate || alreadyRated ? 1 : 0.4, cursor: canRate ? "pointer" : "default" }}
-                                  onClick={() => canRate && handleInsight(r)}
-                                  disabled={!canRate}
-                                >
-                                  💡 鋭い視点 {count}
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  })()}
-                </div>
-              ) : !session ? (
-                <LoginPrompt message="投票するにはログインが必要です" onRequestLogin={onRequestLogin} />
-              ) : (
-                <div>
-                  {poll.options.map((opt, i) => (
-                    <button key={i} style={styles.optionBtn(sel.includes(i))} onClick={() => toggle(poll.id, i, poll.multiple)}>
-                      <span style={styles.dot(sel.includes(i))} />
-                      {opt}
-                    </button>
-                  ))}
-                  <textarea
-                    style={{ ...styles.textarea, width: "100%", boxSizing: "border-box", marginTop: "8px" }}
-                    rows={2}
-                    placeholder="そう思う理由を書く（任意・結果確定後に他の投票者に公開されます）"
-                    value={reasons[poll.id] || ""}
-                    onChange={(e) => setReasons((prev) => ({ ...prev, [poll.id]: e.target.value }))}
-                  />
-                  <button
-                    style={{ ...styles.submitBtn, opacity: sel.length === 0 ? 0.4 : 1, cursor: sel.length === 0 ? "not-allowed" : "pointer" }}
-                    onClick={() => submitVote(poll)}
-                    disabled={sel.length === 0}
-                  >
-                    投票する
-                  </button>
-                </div>
-              )}
-            </div>
-          );
-        })
+        activePolls.map((poll) => (
+          <PollCard key={poll.id} poll={poll} data={data} refresh={refresh} onOpenRoom={onOpenRoom} session={session} onRequestLogin={onRequestLogin} />
+        ))
       )}
     </div>
   );
