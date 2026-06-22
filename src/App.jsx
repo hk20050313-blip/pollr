@@ -108,6 +108,34 @@ function pollStatusLabel(poll) {
   return { text: "公開中", color: palette.green };
 }
 
+// ─── 鋭い視点機能 関連のヘルパー ───────────────────────────────
+const INSIGHT_PERIOD_DAYS = 7;
+
+function getProfileName(data, userId) {
+  const p = (data.profiles || []).find((pr) => pr.id === userId);
+  return p?.display_name || "（不明なユーザー）";
+}
+
+function getProfileAvatar(data, userId) {
+  const p = (data.profiles || []).find((pr) => pr.id === userId);
+  return p?.avatar_url || null;
+}
+
+// この質問の理由コメントへの「鋭い視点」評価がまだ受付期間内かどうか
+function isInsightPeriodOpen(poll) {
+  if (!poll.resolved || !poll.resolvedAt) return false;
+  const deadline = new Date(poll.resolvedAt).getTime() + INSIGHT_PERIOD_DAYS * 24 * 60 * 60 * 1000;
+  return Date.now() <= deadline;
+}
+
+function insightCountFor(data, voteRecordId) {
+  return (data.insightVotes || []).filter((v) => v.voteRecordId === voteRecordId).length;
+}
+
+function hasRatedInsight(data, voteRecordId, raterId) {
+  return (data.insightVotes || []).some((v) => v.voteRecordId === voteRecordId && v.raterId === raterId);
+}
+
 // ISO文字列 ⇔ <input type="datetime-local"> の値（ローカル時刻）の変換
 function toDatetimeLocalValue(isoString) {
   if (!isoString) return "";
@@ -149,13 +177,14 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
     supabase.from("comments").select("*").order("created_at", { ascending: true }),
     supabase.from("profiles").select("*"),
     supabase.from("posts").select("*").order("created_at", { ascending: false }),
+    supabase.from("insight_votes").select("*"),
   ]);
 
   if (catsRes.error) throw catsRes.error;
@@ -164,12 +193,14 @@ async function fetchAllData() {
   if (commentsRes.error) throw commentsRes.error;
   if (profilesRes.error) throw profilesRes.error;
   if (postsRes.error) throw postsRes.error;
+  if (insightRes.error) throw insightRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
     pollId: r.poll_id,
     voterId: r.voter_id,
     selectedOptions: r.selected_options,
+    reason: r.reason || "",
     ts: new Date(r.created_at).getTime(),
   }));
 
@@ -201,6 +232,7 @@ async function fetchAllData() {
       endsAt: p.ends_at || null,
       correctPoints: p.correct_points ?? 10,
       incorrectPoints: p.incorrect_points ?? 0,
+      resolvedAt: p.resolved_at || null,
     };
   });
 
@@ -216,7 +248,13 @@ async function fetchAllData() {
     ts: new Date(p.created_at).getTime(),
   }));
 
-  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts };
+  const insightVotes = insightRes.data.map((v) => ({
+    id: v.id,
+    voteRecordId: v.vote_record_id,
+    raterId: v.rater_id,
+  }));
+
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -985,6 +1023,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
   };
   const [selections, setSelections] = useState(() => initialState().sel);
   const [voted, setVoted] = useState(() => initialState().vd);
+  const [reasons, setReasons] = useState({});
 
   const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
@@ -1005,12 +1044,23 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
     if (!session) return;
     const sel = selections[poll.id] || [];
     if (sel.length === 0) return;
-    const { error } = await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel });
+    const reason = (reasons[poll.id] || "").trim();
+    const { error } = await supabase.from("vote_records").insert({ poll_id: poll.id, voter_id: voterId, selected_options: sel, reason: reason || null });
     if (error) {
       alert("投票に失敗しました： " + error.message);
       return;
     }
     setVoted((prev) => ({ ...prev, [poll.id]: true }));
+    await refresh();
+  };
+
+  const handleInsight = async (record) => {
+    if (!session) return;
+    const { error } = await supabase.from("insight_votes").insert({ vote_record_id: record.id, rater_id: session.user.id });
+    if (error) {
+      alert("評価に失敗しました： " + error.message);
+      return;
+    }
     await refresh();
   };
 
@@ -1100,6 +1150,49 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                   <div style={{ fontSize: "12px", color: palette.muted, marginTop: "12px" }}>
                     合計 {total} 票{!poll.resolved && " · 正解発表をお待ちください"}
                   </div>
+
+                  {poll.resolved && (() => {
+                    const reasonRecords = (data.voteRecords || []).filter((r) => r.pollId === poll.id && r.reason && r.reason.trim());
+                    if (reasonRecords.length === 0) return null;
+                    const periodOpen = isInsightPeriodOpen(poll);
+                    return (
+                      <div style={{ marginTop: "20px", borderTop: `1px solid ${palette.border}`, paddingTop: "16px" }}>
+                        <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginBottom: "12px" }}>
+                          💡 みんなの理由（{reasonRecords.length}件）{!periodOpen && " · 評価期間は終了しました"}
+                        </div>
+                        {reasonRecords.map((r) => {
+                          const isMine = session && r.voterId === session.user.id;
+                          const iVotedThisPoll = session && (data.voteRecords || []).some((vr) => vr.pollId === poll.id && vr.voterId === session.user.id);
+                          const alreadyRated = session && hasRatedInsight(data, r.id, session.user.id);
+                          const count = insightCountFor(data, r.id);
+                          const canRate = session && !isMine && iVotedThisPoll && periodOpen && !alreadyRated;
+                          return (
+                            <div key={r.id} style={{ ...styles.commentCard, marginBottom: "10px" }}>
+                              <div style={styles.commentMeta}>
+                                {getProfileAvatar(data, r.voterId) ? (
+                                  <img src={getProfileAvatar(data, r.voterId)} alt="" style={{ ...styles.avatar(palette.accent), objectFit: "cover" }} />
+                                ) : (
+                                  <span style={styles.avatar(palette.accent)}>{initials(getProfileName(data, r.voterId))}</span>
+                                )}
+                                <span style={styles.commentAuthor}>{getProfileName(data, r.voterId)}</span>
+                                <span style={{ fontSize: "11px", color: palette.muted }}>{r.selectedOptions.map((i) => poll.options[i]).join("、")}を選択</span>
+                              </div>
+                              <div style={styles.commentBody}>{r.reason}</div>
+                              <div style={styles.commentActions}>
+                                <button
+                                  style={{ ...styles.actionBtn(alreadyRated), opacity: canRate || alreadyRated ? 1 : 0.4, cursor: canRate ? "pointer" : "default" }}
+                                  onClick={() => canRate && handleInsight(r)}
+                                  disabled={!canRate}
+                                >
+                                  💡 鋭い視点 {count}
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
                 </div>
               ) : !session ? (
                 <LoginPrompt message="投票するにはログインが必要です" onRequestLogin={onRequestLogin} />
@@ -1111,6 +1204,13 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                       {opt}
                     </button>
                   ))}
+                  <textarea
+                    style={{ ...styles.textarea, width: "100%", boxSizing: "border-box", marginTop: "8px" }}
+                    rows={2}
+                    placeholder="そう思う理由を書く（任意・結果確定後に他の投票者に公開されます）"
+                    value={reasons[poll.id] || ""}
+                    onChange={(e) => setReasons((prev) => ({ ...prev, [poll.id]: e.target.value }))}
+                  />
                   <button
                     style={{ ...styles.submitBtn, opacity: sel.length === 0 ? 0.4 : 1, cursor: sel.length === 0 ? "not-allowed" : "pointer" }}
                     onClick={() => submitVote(poll)}
@@ -1426,13 +1526,13 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
   const confirmResolve = async (poll) => {
     const draft = getDraft(poll);
     if (draft.length === 0) return;
-    await supabase.from("polls").update({ resolved: true, correct_options: [...draft].sort((a, b) => a - b) }).eq("id", poll.id);
+    await supabase.from("polls").update({ resolved: true, correct_options: [...draft].sort((a, b) => a - b), resolved_at: new Date().toISOString() }).eq("id", poll.id);
     setOpenResolve((prev) => ({ ...prev, [poll.id]: false }));
     await refresh();
   };
 
   const unresolvePoll = async (pollId) => {
-    await supabase.from("polls").update({ resolved: false, correct_options: [] }).eq("id", pollId);
+    await supabase.from("polls").update({ resolved: false, correct_options: [], resolved_at: null }).eq("id", pollId);
     setCorrectDraft((prev) => ({ ...prev, [pollId]: [] }));
     await refresh();
   };
@@ -1744,6 +1844,10 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
   const rate = total > 0 ? Math.round((correctCount / total) * 100) : 0;
   const totalPoints = resolvedHistory.reduce((sum, h) => sum + (h.points || 0), 0);
 
+  const reasonsWritten = resolvedHistory.filter((h) => h.record.reason && h.record.reason.trim());
+  const reasonsWithInsight = reasonsWritten.filter((h) => insightCountFor(data, h.record.id) > 0);
+  const insightRate = reasonsWritten.length > 0 ? Math.round((reasonsWithInsight.length / reasonsWritten.length) * 100) : null;
+
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
 
   return (
@@ -1762,6 +1866,10 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
         <div style={{ flex: "1 1 100px" }}>
           <div style={{ fontSize: "28px", fontWeight: "800", color: palette.accent }}>{total > 0 ? `${rate}%` : "—"}</div>
           <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginTop: "4px" }}>的中率</div>
+        </div>
+        <div style={{ flex: "1 1 100px" }}>
+          <div style={{ fontSize: "28px", fontWeight: "800", color: "#c792ff" }}>{insightRate !== null ? `${insightRate}%` : "—"}</div>
+          <div style={{ fontSize: "11px", color: palette.muted, letterSpacing: "0.08em", marginTop: "4px" }}>💡 鋭い視点レート</div>
         </div>
         <div style={{ flex: "1 1 100px" }}>
           <div style={{ fontSize: "28px", fontWeight: "800", color: totalPoints >= 0 ? palette.green : palette.danger }}>
@@ -1795,6 +1903,14 @@ function MyRecordScreen({ data, session, onRequestLogin, onOpenRoom }) {
               <CategoryTag category={cat} onOpenRoom={onOpenRoom} />
               <div style={{ fontSize: "15px", fontWeight: "700", marginBottom: "10px" }}>{poll.question}</div>
               <div style={{ fontSize: "12px", color: palette.muted, marginBottom: "6px" }}>あなたの回答：{yourAnswer}</div>
+              {record.reason && record.reason.trim() && (
+                <div style={{ fontSize: "12px", color: palette.muted, marginBottom: "6px" }}>
+                  あなたの理由：「{record.reason}」
+                  {poll.resolved && (
+                    <span style={{ color: "#c792ff", fontWeight: "700" }}> ・💡 鋭い視点 {insightCountFor(data, record.id)}</span>
+                  )}
+                </div>
+              )}
               {correct === null ? (
                 <span style={{ ...styles.badge(false), background: "rgba(136,136,136,0.12)", color: palette.muted, border: `1px solid ${palette.border}` }}>
                   結果待ち
