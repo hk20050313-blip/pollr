@@ -1071,6 +1071,56 @@ function LoginPrompt({ message, onRequestLogin }) {
 }
 
 // ─── フィード（断片的なつぶやきが流れるTwitter風ページ） ───────────
+// ─── 議論 一覧（投票の有無に関わらず、全テーマを横断して見られる入り口） ──
+function DiscussionBrowseScreen({ data, onOpenRoom }) {
+  const countAllComments = (cat) => {
+    const sum = (list) => (list || []).reduce((s, c) => s + 1 + sum(c.replies), 0);
+    return sum(cat.comments);
+  };
+
+  return (
+    <div style={styles.main}>
+      <div style={styles.sectionTitle}>議論 — {data.categories.length}件のテーマ</div>
+      <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "24px", lineHeight: 1.6 }}>
+        投票の有無に関わらず、すべてのテーマの議論ルームがここから見られます。選択肢のないテーマで自由に意見交換できます。
+      </div>
+
+      {data.categories.length === 0 ? (
+        <div style={{ ...styles.card, textAlign: "center", padding: "60px 28px" }}>
+          <div style={{ color: palette.muted, fontSize: "14px" }}>まだテーマがありません。</div>
+        </div>
+      ) : (
+        data.categories.map((cat) => {
+          const pollCount = data.polls.filter((p) => p.categoryId === cat.id).length;
+          const commentCount = countAllComments(cat);
+          const talkerCount = (data.mainTalkers || []).filter((t) => t.categoryId === cat.id).length;
+          return (
+            <button
+              key={cat.id}
+              onClick={() => onOpenRoom(cat.id)}
+              style={{ ...styles.card, display: "block", width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
+                <span style={styles.catDot(cat.color)} />
+                <span style={{ ...styles.numBadge(cat.color), fontSize: "12px" }}>#{cat.number}</span>
+                <span style={{ fontSize: "16px", fontWeight: "700", color: palette.text }}>{cat.name}</span>
+                {talkerCount > 0 && (
+                  <span style={{ fontSize: "10px", fontWeight: "700", color: "#000", background: palette.accent, padding: "2px 6px", borderRadius: "10px" }}>
+                    🎤 {talkerCount}
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: "12px", color: palette.muted }}>
+                💬 {commentCount}件のコメント{pollCount > 0 ? ` · 関連する質問 ${pollCount}件` : " · 自由議論のみ"}
+              </div>
+            </button>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
 function FeedScreen({ data, refresh, session, displayName, avatarUrl, onRequestLogin }) {
   const [text, setText] = useState("");
   const [postError, setPostError] = useState("");
@@ -2535,6 +2585,7 @@ export default function App() {
       {activeRoom === null && !showProfile && (
         <div style={styles.tabBar}>
           <button style={styles.tab(tab === "vote")} onClick={() => setTab("vote")}>投票する</button>
+          <button style={styles.tab(tab === "discuss")} onClick={() => setTab("discuss")}>🗣️ 議論</button>
           <button style={styles.tab(tab === "feed")} onClick={() => setTab("feed")}>📣 フィード</button>
           <button style={styles.tab(tab === "record")} onClick={() => setTab("record")}>🎯 成績</button>
           <button style={styles.tab(tab === "admin")} onClick={() => setTab("admin")}>管理画面</button>
@@ -2547,6 +2598,8 @@ export default function App() {
         <DiscussionRoom data={data} refresh={refresh} categoryId={activeRoom} onBack={closeRoom} session={session} displayName={displayName} avatarUrl={avatarUrl} onRequestLogin={requestLogin} />
       ) : tab === "vote" ? (
         <VoteScreen data={data} refresh={refresh} onOpenRoom={openRoom} session={session} onRequestLogin={requestLogin} />
+      ) : tab === "discuss" ? (
+        <DiscussionBrowseScreen data={data} onOpenRoom={openRoom} />
       ) : tab === "feed" ? (
         <FeedScreen data={data} refresh={refresh} session={session} displayName={displayName} avatarUrl={avatarUrl} onRequestLogin={requestLogin} />
       ) : tab === "record" ? (
