@@ -227,7 +227,7 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes, commentEvalRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes, commentEvalRes, talkersRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
@@ -236,6 +236,7 @@ async function fetchAllData() {
     supabase.from("posts").select("*").order("created_at", { ascending: false }),
     supabase.from("insight_votes").select("*"),
     supabase.from("comment_evaluations").select("*"),
+    supabase.from("main_talkers").select("*"),
   ]);
 
   if (catsRes.error) throw catsRes.error;
@@ -246,6 +247,7 @@ async function fetchAllData() {
   if (postsRes.error) throw postsRes.error;
   if (insightRes.error) throw insightRes.error;
   if (commentEvalRes.error) throw commentEvalRes.error;
+  if (talkersRes.error) throw talkersRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
@@ -307,7 +309,7 @@ async function fetchAllData() {
     raterId: v.rater_id,
   }));
 
-  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes, commentEvaluations: commentEvalRes.data.map((e) => ({ id: e.id, commentId: e.comment_id, raterId: e.rater_id, kind: e.kind })) };
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes, commentEvaluations: commentEvalRes.data.map((e) => ({ id: e.id, commentId: e.comment_id, raterId: e.rater_id, kind: e.kind })), mainTalkers: talkersRes.data.map((t) => ({ id: t.id, categoryId: t.category_id, userId: t.user_id })) };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -712,7 +714,7 @@ function initials(name) {
   return (name || "?").trim().slice(0, 1).toUpperCase();
 }
 
-function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, session, onRequestLogin, iCommentedHere, depth = 0 }) {
+function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, session, onRequestLogin, iCommentedHere, mainTalkerIds, depth = 0 }) {
   const [replying, setReplying] = useState(false);
   const [replyText, setReplyText] = useState("");
 
@@ -734,6 +736,7 @@ function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, sessio
   };
 
   const isMine = session && comment.userId === session.user.id;
+  const isMainTalker = comment.userId && mainTalkerIds && mainTalkerIds.has(comment.userId);
   const insightCount = commentEvalCount(data, comment.id, "insight");
   const deltaCount = commentEvalCount(data, comment.id, "delta");
   const ratedInsight = session && hasRatedComment(data, comment.id, session.user.id, "insight");
@@ -751,6 +754,11 @@ function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, sessio
             <span style={styles.avatar(color)}>{initials(comment.author)}</span>
           )}
           <span style={styles.commentAuthor}>{comment.author}</span>
+          {isMainTalker && (
+            <span style={{ fontSize: "10px", fontWeight: "700", color: "#000", background: palette.accent, padding: "2px 6px", borderRadius: "10px" }}>
+              🎤 メイントーカー
+            </span>
+          )}
           <span style={styles.commentTime}>{timeAgo(comment.ts)}</span>
         </div>
         <div style={styles.commentBody}>{comment.text}</div>
@@ -809,6 +817,7 @@ function CommentItem({ comment, color, onReply, onLike, onEvaluate, data, sessio
               session={session}
               onRequestLogin={onRequestLogin}
               iCommentedHere={iCommentedHere}
+              mainTalkerIds={mainTalkerIds}
               depth={depth + 1}
             />
           ))}
@@ -883,6 +892,8 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
   const comments = category.comments || [];
   const iCommentedHere = !!(session && flattenComments(comments).some((c) => c.userId === session.user.id));
   const countAll = (list) => list.reduce((sum, c) => sum + 1 + countAll(c.replies || []), 0);
+  const talkersForCategory = (data.mainTalkers || []).filter((t) => t.categoryId === categoryId);
+  const mainTalkerIds = new Set(talkersForCategory.map((t) => t.userId));
 
   return (
     <div style={styles.main}>
@@ -893,6 +904,32 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
         <span style={{ ...styles.numBadge(category.color), fontSize: "13px" }}>#{category.number}</span>
         <span style={{ fontSize: "20px", fontWeight: "800" }}>{category.name}</span>
       </div>
+
+      {talkersForCategory.length > 0 && (
+        <div style={{ ...styles.card, marginBottom: "20px", background: "rgba(232,255,71,0.06)", border: `1px solid ${palette.accent}` }}>
+          <div style={{ fontSize: "11px", color: palette.accent, letterSpacing: "0.08em", marginBottom: "10px" }}>🎤 このテーマのメイントーカー</div>
+          <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+            {talkersForCategory.map((t) => (
+              <div key={t.userId} style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <div
+                  style={{
+                    width: "32px", height: "32px", borderRadius: "50%", overflow: "hidden", background: palette.border,
+                    display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: "700", color: palette.accent, flexShrink: 0,
+                  }}
+                >
+                  {getProfileAvatar(data, t.userId) ? (
+                    <img src={getProfileAvatar(data, t.userId)} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  ) : (
+                    initials(getProfileName(data, t.userId))
+                  )}
+                </div>
+                <span style={{ fontSize: "13px", fontWeight: "700" }}>{getProfileName(data, t.userId)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ ...styles.sectionTitle, marginBottom: "12px" }}>
         議論ルーム · {countAll(comments)}件のコメント
         {relatedPolls.length > 0 && ` · 関連する質問 ${relatedPolls.length}件`}
@@ -939,6 +976,7 @@ function DiscussionRoom({ data, refresh, categoryId, onBack, session, displayNam
             session={session}
             onRequestLogin={onRequestLogin}
             iCommentedHere={iCommentedHere}
+            mainTalkerIds={mainTalkerIds}
           />
         ))
       )}
@@ -1418,6 +1456,8 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState(null);
   const [editName, setEditName] = useState("");
+  const [talkerPanelId, setTalkerPanelId] = useState(null);
+  const [selectedUserId, setSelectedUserId] = useState("");
 
   const addCategory = async () => {
     if (!newName.trim()) return;
@@ -1441,6 +1481,18 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
   const deleteCategory = async (id) => {
     await supabase.from("polls").update({ category_id: null }).eq("category_id", id);
     await supabase.from("categories").delete().eq("id", id);
+    await refresh();
+  };
+
+  const addTalker = async (categoryId) => {
+    if (!selectedUserId) return;
+    await supabase.from("main_talkers").insert({ category_id: categoryId, user_id: selectedUserId });
+    setSelectedUserId("");
+    await refresh();
+  };
+
+  const removeTalker = async (categoryId, userId) => {
+    await supabase.from("main_talkers").delete().eq("category_id", categoryId).eq("user_id", userId);
     await refresh();
   };
 
@@ -1469,35 +1521,84 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
         <div style={{ color: palette.muted, fontSize: "13px" }}>テーマがまだありません。上で追加してください。</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          {data.categories.map((cat) => (
-            <div key={cat.id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
-              <span style={styles.catDot(cat.color)} />
-              <span style={{ ...styles.numBadge(cat.color), fontSize: "11px" }}>#{cat.number}</span>
-              {editingId === cat.id ? (
-                <input
-                  style={{ ...styles.input, marginBottom: 0, flex: 1, padding: "6px 10px" }}
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && saveEdit()}
-                  autoFocus
-                />
-              ) : (
-                <span style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{cat.name}</span>
-              )}
-              <span style={{ fontSize: "11px", color: palette.muted, marginRight: "4px" }}>{countForCategory(cat.id)}件の質問</span>
-              {onOpenRoom && (
-                <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => onOpenRoom(cat.id)}>
-                  💬 {countComments(cat)}
-                </button>
-              )}
-              {editingId === cat.id ? (
-                <button style={{ ...styles.removeBtn, color: palette.green, fontSize: "13px" }} onClick={saveEdit}>保存</button>
-              ) : (
-                <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => startEdit(cat)}>編集</button>
-              )}
-              <button style={styles.removeBtn} onClick={() => deleteCategory(cat.id)}>×</button>
-            </div>
-          ))}
+          {data.categories.map((cat) => {
+            const talkers = (data.mainTalkers || []).filter((t) => t.categoryId === cat.id);
+            const assignedIds = talkers.map((t) => t.userId);
+            const availableProfiles = (data.profiles || []).filter((p) => !assignedIds.includes(p.id));
+            return (
+              <div key={cat.id}>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
+                  <span style={styles.catDot(cat.color)} />
+                  <span style={{ ...styles.numBadge(cat.color), fontSize: "11px" }}>#{cat.number}</span>
+                  {editingId === cat.id ? (
+                    <input
+                      style={{ ...styles.input, marginBottom: 0, flex: 1, padding: "6px 10px" }}
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && saveEdit()}
+                      autoFocus
+                    />
+                  ) : (
+                    <span style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{cat.name}</span>
+                  )}
+                  <span style={{ fontSize: "11px", color: palette.muted, marginRight: "4px" }}>{countForCategory(cat.id)}件の質問</span>
+                  {onOpenRoom && (
+                    <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => onOpenRoom(cat.id)}>
+                      💬 {countComments(cat)}
+                    </button>
+                  )}
+                  <button
+                    style={{ ...styles.removeBtn, color: talkerPanelId === cat.id ? palette.accent : palette.muted, fontSize: "13px" }}
+                    onClick={() => setTalkerPanelId(talkerPanelId === cat.id ? null : cat.id)}
+                  >
+                    🎤 {talkers.length}
+                  </button>
+                  {editingId === cat.id ? (
+                    <button style={{ ...styles.removeBtn, color: palette.green, fontSize: "13px" }} onClick={saveEdit}>保存</button>
+                  ) : (
+                    <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => startEdit(cat)}>編集</button>
+                  )}
+                  <button style={styles.removeBtn} onClick={() => deleteCategory(cat.id)}>×</button>
+                </div>
+
+                {talkerPanelId === cat.id && (
+                  <div style={{ padding: "12px 14px", marginTop: "4px", background: "#161616", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
+                    <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "10px" }}>
+                      🎤 「{cat.name}」のメイントーカー（複数人指定可）
+                    </div>
+                    {talkers.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }}>
+                        {talkers.map((t) => (
+                          <span
+                            key={t.userId}
+                            style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", padding: "5px 10px", background: "rgba(232,255,71,0.12)", border: `1px solid ${palette.accent}`, borderRadius: "20px" }}
+                          >
+                            {getProfileName(data, t.userId)}
+                            <button onClick={() => removeTalker(cat.id, t.userId)} style={{ background: "none", border: "none", color: palette.muted, cursor: "pointer", fontSize: "13px", padding: 0 }}>
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: "8px" }}>
+                      <select
+                        style={{ ...styles.input, marginBottom: 0, flex: 1 }}
+                        value={selectedUserId}
+                        onChange={(e) => setSelectedUserId(e.target.value)}
+                      >
+                        <option value="">ユーザーを選択...</option>
+                        {availableProfiles.map((p) => (
+                          <option key={p.id} value={p.id}>{p.display_name}</option>
+                        ))}
+                      </select>
+                      <button style={{ ...styles.submitBtn, marginTop: 0 }} onClick={() => addTalker(cat.id)}>追加</button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
