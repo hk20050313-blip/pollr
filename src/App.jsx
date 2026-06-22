@@ -227,7 +227,7 @@ function buildCommentTree(flat, likedIds) {
 
 // Supabaseから全データを取得し、画面コンポーネントが使う形（旧localStorage版と同じ形）に組み立てる
 async function fetchAllData() {
-  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes, commentEvalRes, talkersRes] = await Promise.all([
+  const [catsRes, pollsRes, votesRes, commentsRes, profilesRes, postsRes, insightRes, commentEvalRes, talkersRes, genresRes] = await Promise.all([
     supabase.from("categories").select("*").order("number", { ascending: true }),
     supabase.from("polls").select("*").order("created_at", { ascending: true }),
     supabase.from("vote_records").select("*"),
@@ -237,6 +237,7 @@ async function fetchAllData() {
     supabase.from("insight_votes").select("*"),
     supabase.from("comment_evaluations").select("*"),
     supabase.from("main_talkers").select("*"),
+    supabase.from("genres").select("*").order("number", { ascending: true }),
   ]);
 
   if (catsRes.error) throw catsRes.error;
@@ -248,6 +249,7 @@ async function fetchAllData() {
   if (insightRes.error) throw insightRes.error;
   if (commentEvalRes.error) throw commentEvalRes.error;
   if (talkersRes.error) throw talkersRes.error;
+  if (genresRes.error) throw genresRes.error;
 
   const voteRecords = votesRes.data.map((r) => ({
     id: r.id,
@@ -260,11 +262,19 @@ async function fetchAllData() {
 
   const likedIds = getLikedIds();
 
+  const genres = genresRes.data.map((g) => ({
+    id: g.id,
+    name: g.name,
+    color: g.color,
+    number: g.number,
+  }));
+
   const categories = catsRes.data.map((c) => ({
     id: c.id,
     name: c.name,
     color: c.color,
     number: c.number,
+    genreId: c.genre_id || null,
     comments: buildCommentTree(commentsRes.data.filter((cm) => cm.category_id === c.id), likedIds),
   }));
 
@@ -309,7 +319,9 @@ async function fetchAllData() {
     raterId: v.rater_id,
   }));
 
-  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes, commentEvaluations: commentEvalRes.data.map((e) => ({ id: e.id, commentId: e.comment_id, raterId: e.rater_id, kind: e.kind })), mainTalkers: talkersRes.data.map((t) => ({ id: t.id, categoryId: t.category_id, userId: t.user_id })) };
+  const nextGenreNumber = genres.length > 0 ? Math.max(...genres.map((g) => g.number)) + 1 : 1;
+
+  return { categories, polls, voteRecords, nextCategoryNumber, profiles: profilesRes.data, posts, insightVotes, commentEvaluations: commentEvalRes.data.map((e) => ({ id: e.id, commentId: e.comment_id, raterId: e.rater_id, kind: e.kind })), mainTalkers: talkersRes.data.map((t) => ({ id: t.id, categoryId: t.category_id, userId: t.user_id })), genres, nextGenreNumber };
 }
 
 const CATEGORY_COLORS = ["#e8ff47", "#4dff91", "#ff8fd6", "#7ec8ff", "#ff9d4d", "#c792ff", "#ff6b6b", "#5ce1e6"];
@@ -1081,24 +1093,31 @@ function LoginPrompt({ message, onRequestLogin }) {
 // ─── フィード（断片的なつぶやきが流れるTwitter風ページ） ───────────
 // ─── 議論 一覧（投票の有無に関わらず、全テーマを横断して見られる入り口） ──
 function DiscussionBrowseScreen({ data, onOpenRoom }) {
+  const [filterGenre, setFilterGenre] = useState(null);
   const countAllComments = (cat) => {
     const sum = (list) => (list || []).reduce((s, c) => s + 1 + sum(c.replies), 0);
     return sum(cat.comments);
   };
 
+  const categoriesToShow = filterGenre === null ? data.categories : data.categories.filter((c) => c.genreId === filterGenre);
+
   return (
     <div style={styles.main}>
-      <div style={styles.sectionTitle}>議論 — {data.categories.length}件のテーマ</div>
+      <div style={styles.sectionTitle}>議論 — {categoriesToShow.length}件のテーマ</div>
       <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "24px", lineHeight: 1.6 }}>
         投票の有無に関わらず、すべてのテーマの議論ルームがここから見られます。選択肢のないテーマで自由に意見交換できます。
       </div>
 
-      {data.categories.length === 0 ? (
+      {(data.genres || []).length > 0 && (
+        <CategoryFilterBar categories={data.genres} selected={filterGenre} onSelect={setFilterGenre} />
+      )}
+
+      {categoriesToShow.length === 0 ? (
         <div style={{ ...styles.card, textAlign: "center", padding: "60px 28px" }}>
           <div style={{ color: palette.muted, fontSize: "14px" }}>まだテーマがありません。</div>
         </div>
       ) : (
-        data.categories.map((cat) => {
+        categoriesToShow.map((cat) => {
           const pollCount = data.polls.filter((p) => p.categoryId === cat.id).length;
           const commentCount = countAllComments(cat);
           const talkerCount = (data.mainTalkers || []).filter((t) => t.categoryId === cat.id).length;
@@ -1472,13 +1491,33 @@ function PollCard({ poll, data, refresh, onOpenRoom, session, onRequestLogin }) 
 }
 
 function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
+  const [filterGenre, setFilterGenre] = useState(null);
   const [filterCat, setFilterCat] = useState(null);
-  const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
+
+  const handleGenreSelect = (genreId) => {
+    setFilterGenre(genreId);
+    setFilterCat(null); // ジャンルを変えたらテーマの絞り込みはリセット
+  };
+
+  const categoriesInGenre = filterGenre === null ? data.categories : data.categories.filter((c) => c.genreId === filterGenre);
+
+  const activePolls = data.polls.filter((p) => {
+    if (!isPollOpen(p)) return false;
+    if (filterCat !== null) return p.categoryId === filterCat;
+    if (filterGenre !== null) {
+      const cat = data.categories.find((c) => c.id === p.categoryId);
+      return !!(cat && cat.genreId === filterGenre);
+    }
+    return true;
+  });
 
   return (
     <div style={styles.main}>
-      {data.categories.length > 0 && (
-        <CategoryFilterBar categories={data.categories} selected={filterCat} onSelect={setFilterCat} />
+      {(data.genres || []).length > 0 && (
+        <CategoryFilterBar categories={data.genres} selected={filterGenre} onSelect={handleGenreSelect} />
+      )}
+      {categoriesInGenre.length > 0 && (
+        <CategoryFilterBar categories={categoriesInGenre} selected={filterCat} onSelect={setFilterCat} />
       )}
 
       <div style={styles.sectionTitle}>公開中の質問 — {activePolls.length}件</div>
@@ -1499,7 +1538,88 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
   );
 }
 
-// ─── CATEGORY MANAGER ──────────────────────────────────────────
+// ─── GENRE MANAGER（ジャンル管理。テーマより上の大分類） ───────────
+function GenreManager({ data, refresh }) {
+  const [newName, setNewName] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+
+  const addGenre = async () => {
+    if (!newName.trim()) return;
+    const usedColors = (data.genres || []).map((g) => g.color);
+    const color = CATEGORY_COLORS.find((c) => !usedColors.includes(c)) || CATEGORY_COLORS[(data.genres || []).length % CATEGORY_COLORS.length];
+    const number = data.nextGenreNumber || (data.genres || []).length + 1;
+    setNewName("");
+    await supabase.from("genres").insert({ name: newName.trim(), color, number });
+    await refresh();
+  };
+
+  const startEdit = (g) => { setEditingId(g.id); setEditName(g.name); };
+
+  const saveEdit = async () => {
+    if (!editName.trim()) return;
+    await supabase.from("genres").update({ name: editName.trim() }).eq("id", editingId);
+    setEditingId(null);
+    await refresh();
+  };
+
+  const deleteGenre = async (id) => {
+    await supabase.from("categories").update({ genre_id: null }).eq("genre_id", id);
+    await supabase.from("genres").delete().eq("id", id);
+    await refresh();
+  };
+
+  const countCategories = (id) => (data.categories || []).filter((c) => c.genreId === id).length;
+
+  return (
+    <div style={{ ...styles.card, marginBottom: "28px" }}>
+      <div style={styles.sectionTitle}>ジャンル（大分類）管理</div>
+
+      <div style={{ display: "flex", gap: "8px", marginBottom: "20px" }}>
+        <input
+          style={{ ...styles.input, marginBottom: 0, flex: 1 }}
+          placeholder="新しいジャンル名（例：スポーツ、投資...）"
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && addGenre()}
+        />
+        <button style={{ ...styles.submitBtn, marginTop: 0, padding: "12px 24px" }} onClick={addGenre}>追加</button>
+      </div>
+
+      {(data.genres || []).length === 0 ? (
+        <div style={{ color: palette.muted, fontSize: "13px" }}>ジャンルがまだありません。上で追加してください。</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+          {data.genres.map((g) => (
+            <div key={g.id} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "10px 12px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
+              <span style={styles.catDot(g.color)} />
+              <span style={{ ...styles.numBadge(g.color), fontSize: "11px" }}>#{g.number}</span>
+              {editingId === g.id ? (
+                <input
+                  style={{ ...styles.input, marginBottom: 0, flex: 1, padding: "6px 10px" }}
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && saveEdit()}
+                  autoFocus
+                />
+              ) : (
+                <span style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{g.name}</span>
+              )}
+              <span style={{ fontSize: "11px", color: palette.muted, marginRight: "4px" }}>{countCategories(g.id)}件のテーマ</span>
+              {editingId === g.id ? (
+                <button style={{ ...styles.removeBtn, color: palette.green, fontSize: "13px" }} onClick={saveEdit}>保存</button>
+              ) : (
+                <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => startEdit(g)}>編集</button>
+              )}
+              <button style={styles.removeBtn} onClick={() => deleteGenre(g.id)}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CategoryManager({ data, refresh, onOpenRoom }) {
   const [newName, setNewName] = useState("");
   const [editingId, setEditingId] = useState(null);
@@ -1541,6 +1661,11 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
 
   const removeTalker = async (categoryId, userId) => {
     await supabase.from("main_talkers").delete().eq("category_id", categoryId).eq("user_id", userId);
+    await refresh();
+  };
+
+  const setGenre = async (categoryId, genreId) => {
+    await supabase.from("categories").update({ genre_id: genreId || null }).eq("id", categoryId);
     await refresh();
   };
 
@@ -1589,6 +1714,16 @@ function CategoryManager({ data, refresh, onOpenRoom }) {
                   ) : (
                     <span style={{ flex: 1, fontSize: "13px", fontWeight: "600" }}>{cat.name}</span>
                   )}
+                  <select
+                    style={{ ...styles.select, marginBottom: 0, width: "auto", padding: "6px 10px", fontSize: "11px" }}
+                    value={cat.genreId || ""}
+                    onChange={(e) => setGenre(cat.id, e.target.value)}
+                  >
+                    <option value="">ジャンル未設定</option>
+                    {(data.genres || []).map((g) => (
+                      <option key={g.id} value={g.id}>{g.name}</option>
+                    ))}
+                  </select>
                   <span style={{ fontSize: "11px", color: palette.muted, marginRight: "4px" }}>{countForCategory(cat.id)}件の質問</span>
                   {onOpenRoom && (
                     <button style={{ ...styles.removeBtn, color: palette.muted, fontSize: "13px" }} onClick={() => onOpenRoom(cat.id)}>
@@ -1763,6 +1898,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
   const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0", reasonLockAt: "" });
   const [showNew, setShowNew] = useState(false);
   const [showCatManager, setShowCatManager] = useState(false);
+  const [showGenreManager, setShowGenreManager] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
   const [filterCat, setFilterCat] = useState(null);
   const [openResolve, setOpenResolve] = useState({});
@@ -1902,6 +2038,12 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
           </button>
           <button
             style={{ ...styles.submitBtn, marginTop: 0, background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
+            onClick={() => setShowGenreManager((s) => !s)}
+          >
+            {showGenreManager ? "ジャンル管理を閉じる" : "🗂 ジャンルを管理"}
+          </button>
+          <button
+            style={{ ...styles.submitBtn, marginTop: 0, background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
             onClick={() => setShowCatManager((s) => !s)}
           >
             {showCatManager ? "テーマ管理を閉じる" : "🏷 テーマを管理"}
@@ -1910,6 +2052,8 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
       </div>
 
       {showLeaderboard && <AdminLeaderboard data={data} />}
+
+      {showGenreManager && <GenreManager data={data} refresh={refresh} />}
 
       {showCatManager && <CategoryManager data={data} refresh={refresh} onOpenRoom={onOpenRoom} />}
 
@@ -1941,9 +2085,24 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
             onChange={(e) => setForm({ ...form, categoryId: e.target.value })}
           >
             <option value="">未分類</option>
-            {data.categories.map((c) => (
-              <option key={c.id} value={c.id}>{c.name}</option>
-            ))}
+            {(data.genres || []).map((g) => {
+              const catsInGenre = data.categories.filter((c) => c.genreId === g.id);
+              if (catsInGenre.length === 0) return null;
+              return (
+                <optgroup key={g.id} label={g.name}>
+                  {catsInGenre.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
+            {data.categories.filter((c) => !c.genreId).length > 0 && (
+              <optgroup label="ジャンル未設定">
+                {data.categories.filter((c) => !c.genreId).map((c) => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </optgroup>
+            )}
           </select>
 
           <label style={styles.label}>選択肢</label>
