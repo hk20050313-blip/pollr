@@ -128,6 +128,13 @@ function isInsightPeriodOpen(poll) {
   return Date.now() <= deadline;
 }
 
+// 理由コメントがまだ編集可能か（結果確定 or 質問者が設定した変更期限のどちらか早い方でロック）
+function canEditReason(poll) {
+  if (poll.resolved) return false;
+  if (poll.reasonLockAt && Date.now() >= new Date(poll.reasonLockAt).getTime()) return false;
+  return true;
+}
+
 function insightCountFor(data, voteRecordId) {
   return (data.insightVotes || []).filter((v) => v.voteRecordId === voteRecordId).length;
 }
@@ -233,6 +240,7 @@ async function fetchAllData() {
       correctPoints: p.correct_points ?? 10,
       incorrectPoints: p.incorrect_points ?? 0,
       resolvedAt: p.resolved_at || null,
+      reasonLockAt: p.reason_lock_at || null,
     };
   });
 
@@ -1024,6 +1032,8 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
   const [selections, setSelections] = useState(() => initialState().sel);
   const [voted, setVoted] = useState(() => initialState().vd);
   const [reasons, setReasons] = useState({});
+  const [editingPollId, setEditingPollId] = useState(null);
+  const [editText, setEditText] = useState("");
 
   const activePolls = data.polls.filter((p) => isPollOpen(p) && (filterCat === null || p.categoryId === filterCat));
   const getCategory = (id) => data.categories.find((c) => c.id === id) || null;
@@ -1064,6 +1074,16 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
     await refresh();
   };
 
+  const updateReason = async (record, newReason) => {
+    const { error } = await supabase.from("vote_records").update({ reason: newReason || null }).eq("id", record.id);
+    if (error) {
+      alert("理由の更新に失敗しました： " + error.message);
+      return;
+    }
+    setEditingPollId(null);
+    await refresh();
+  };
+
   return (
     <div style={styles.main}>
       {data.categories.length > 0 && (
@@ -1085,6 +1105,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
           const sel = selections[poll.id] || [];
           const total = poll.votes.reduce((a, b) => a + b, 0) + (didVote ? sel.length : 0);
           const cat = getCategory(poll.categoryId);
+          const myRecord = (data.voteRecords || []).find((r) => r.pollId === poll.id && r.voterId === voterId);
 
           return (
             <div key={poll.id} style={styles.card}>
@@ -1104,6 +1125,65 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                   <div style={{ ...styles.sectionTitle, marginBottom: "16px", color: palette.green }}>
                     ✓ 投票完了 — 結果
                   </div>
+
+                  {!poll.resolved && myRecord && (() => {
+                    const editable = canEditReason(poll);
+                    return (
+                      <div style={{ marginBottom: "16px", padding: "12px 14px", background: "#1a1a1a", borderRadius: "3px", border: `1px solid ${palette.border}` }}>
+                        <div style={{ fontSize: "11px", color: editable ? palette.muted : palette.danger, marginBottom: "8px" }}>
+                          あなたの理由 ・ {editable
+                            ? `💬 ${poll.reasonLockAt ? `${formatDateTime(poll.reasonLockAt)}まで編集できます` : "結果確定までは自由に編集できます。確定後は変更できなくなるのでご注意ください。"}`
+                            : "🔒 変更期限を過ぎました。これ以降は編集できません。"}
+                        </div>
+                        {editingPollId === poll.id && editable ? (
+                          <div>
+                            <textarea
+                              style={{ ...styles.textarea, width: "100%", boxSizing: "border-box" }}
+                              rows={2}
+                              value={editText}
+                              onChange={(e) => setEditText(e.target.value)}
+                              autoFocus
+                            />
+                            <div style={{ display: "flex", gap: "8px", marginTop: "8px" }}>
+                              <button style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }} onClick={() => updateReason(myRecord, editText.trim())}>
+                                保存
+                              </button>
+                              <button
+                                style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.muted, border: `1px solid ${palette.border}` }}
+                                onClick={() => setEditingPollId(null)}
+                              >
+                                キャンセル
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <div style={{ fontSize: "13px", marginBottom: "8px" }}>
+                              {myRecord.reason ? myRecord.reason : <span style={{ color: palette.muted }}>（理由はまだ書かれていません）</span>}
+                            </div>
+                            {editable && (
+                              <div style={{ display: "flex", gap: "8px" }}>
+                                <button
+                                  style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px" }}
+                                  onClick={() => { setEditingPollId(poll.id); setEditText(myRecord.reason || ""); }}
+                                >
+                                  {myRecord.reason ? "編集" : "理由を追加"}
+                                </button>
+                                {myRecord.reason && (
+                                  <button
+                                    style={{ ...styles.submitBtn, marginTop: 0, padding: "8px 16px", fontSize: "11px", background: "transparent", color: palette.danger, border: `1px solid ${palette.danger}` }}
+                                    onClick={() => updateReason(myRecord, null)}
+                                  >
+                                    削除
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {poll.resolved && (() => {
                     const correct = isCorrectSelection(poll, sel);
@@ -1176,6 +1256,7 @@ function VoteScreen({ data, refresh, onOpenRoom, session, onRequestLogin }) {
                                 )}
                                 <span style={styles.commentAuthor}>{getProfileName(data, r.voterId)}</span>
                                 <span style={{ fontSize: "11px", color: palette.muted }}>{r.selectedOptions.map((i) => poll.options[i]).join("、")}を選択</span>
+                                {isMine && <span style={{ fontSize: "11px", color: palette.muted }}>・🔒 確定済み（あなたの理由）</span>}
                               </div>
                               <div style={styles.commentBody}>{r.reason}</div>
                               <div style={styles.commentActions}>
@@ -1415,7 +1496,7 @@ function AdminLeaderboard({ data }) {
 // ─── ADMIN SCREEN ────────────────────────────────────────────────
 function AdminScreen({ data, refresh, onOpenRoom }) {
   const [editId, setEditId] = useState(null);
-  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0" });
+  const [form, setForm] = useState({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0", reasonLockAt: "" });
   const [showNew, setShowNew] = useState(false);
   const [showCatManager, setShowCatManager] = useState(false);
   const [showLeaderboard, setShowLeaderboard] = useState(false);
@@ -1424,7 +1505,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
   const [correctDraft, setCorrectDraft] = useState({});
 
   const openNew = () => {
-    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0" });
+    setForm({ question: "", options: ["", ""], multiple: false, categoryId: "", startsAt: "", endsAt: "", correctPoints: "10", incorrectPoints: "0", reasonLockAt: "" });
     setEditId(null);
     setShowNew(true);
   };
@@ -1439,6 +1520,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
       endsAt: toDatetimeLocalValue(poll.endsAt),
       correctPoints: String(poll.correctPoints ?? 10),
       incorrectPoints: String(poll.incorrectPoints ?? 0),
+      reasonLockAt: toDatetimeLocalValue(poll.reasonLockAt),
     });
     setEditId(poll.id);
     setShowNew(true);
@@ -1454,6 +1536,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
     const endsAt = form.endsAt ? new Date(form.endsAt).toISOString() : null;
     const correctPoints = Math.max(0, Number(form.correctPoints) || 0);
     const incorrectPoints = Math.max(0, Number(form.incorrectPoints) || 0);
+    const reasonLockAt = form.reasonLockAt ? new Date(form.reasonLockAt).toISOString() : null;
     if (editId) {
       // 選択肢が変わるとインデックスの意味が変わるため、過去の個別投票記録と正解設定はクリアする
       await supabase.from("polls").update({
@@ -1467,6 +1550,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         ends_at: endsAt,
         correct_points: correctPoints,
         incorrect_points: incorrectPoints,
+        reason_lock_at: reasonLockAt,
       }).eq("id", editId);
       await supabase.from("vote_records").delete().eq("poll_id", editId);
     } else {
@@ -1482,6 +1566,7 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
         ends_at: endsAt,
         correct_points: correctPoints,
         incorrect_points: incorrectPoints,
+        reason_lock_at: reasonLockAt,
       });
     }
     closeForm();
@@ -1669,6 +1754,17 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
             「失うポイント」はプラスの数で入力してください（自動的に減点されます）
           </div>
 
+          <label style={styles.label}>理由コメントの変更期限（任意）</label>
+          <input
+            type="datetime-local"
+            style={styles.input}
+            value={form.reasonLockAt}
+            onChange={(e) => setForm({ ...form, reasonLockAt: e.target.value })}
+          />
+          <div style={{ fontSize: "11px", color: palette.muted, marginBottom: "16px", marginTop: "-8px" }}>
+            空欄の場合、結果確定までは自由に編集できます。日時を指定すると、結果確定前でもその時刻でロックされます
+          </div>
+
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "20px" }}>
             <input
               type="checkbox"
@@ -1715,6 +1811,9 @@ function AdminScreen({ data, refresh, onOpenRoom }) {
                 )}
                 <div style={{ fontSize: "11px", color: palette.muted, marginTop: "4px" }}>
                   🏆 正解 +{poll.correctPoints}pt ／ 不正解 -{poll.incorrectPoints}pt
+                </div>
+                <div style={{ fontSize: "11px", color: palette.muted, marginTop: "4px" }}>
+                  💬 理由コメント変更期限：{poll.reasonLockAt ? formatDateTime(poll.reasonLockAt) : "結果確定まで自由"}
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: "6px", alignItems: "flex-end" }}>
